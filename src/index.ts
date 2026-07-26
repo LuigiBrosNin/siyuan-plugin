@@ -28,6 +28,10 @@ const SKIP_PATH_FRAGMENTS = [
 const LOCKED_EXTENSIONS = [".db", ".db-shm", ".db-wal", ".log", ".lock"];
 const SYNCED_STATE_KEY  = "github-sync-state.json";
 
+const PLUGIN_MANIFEST_PATH = `${SYNC_ROOT}/plugin-manifest.json`;
+const WIDGET_MANIFEST_PATH = `${SYNC_ROOT}/widget-manifest.json`;
+const PLUGIN_SELF_NAME     = "siyuan-github-sync";
+
 // ─── Interfaces ───────────────────────────────────────────────────────────────
 
 interface GitHubConfig {
@@ -72,6 +76,15 @@ interface MergePlan {
     toPull:      { githubPath: string; siYuanPath: string }[];
     conflicted:  { githubPath: string; siYuanPath: string }[];
     skippedLarge: number;
+}
+
+interface PluginManifestEntry {
+    name: string;
+    version: string;
+}
+
+interface PluginManifest {
+    plugins: PluginManifestEntry[];
 }
 
 // ─── Utilitaires ─────────────────────────────────────────────────────────────
@@ -435,6 +448,155 @@ export default class GitHubSyncPlugin extends Plugin {
         return files;
     }
 
+    private async collectInstalledPlugins(): Promise<PluginManifest> {
+        const entries = await this.siYuanReadDir(`${SYNC_ROOT}/plugins`);
+        const plugins: PluginManifestEntry[] = [];
+        for (const e of entries) {
+            if (!e.isDir || e.name === PLUGIN_SELF_NAME) continue;
+            try {
+                const raw = await this.siYuanGetFile(`${SYNC_ROOT}/plugins/${e.name}/plugin.json`);
+                if (!raw) continue;
+                const text = new TextDecoder().decode(raw);
+                const json = JSON.parse(text);
+                if (json.name && json.version) {
+                    plugins.push({ name: json.name, version: json.version });
+                }
+            } catch { continue; }
+        }
+        return { plugins };
+    }
+
+    private async generatePluginManifest(): Promise<{ githubPath: string; content: ArrayBuffer }> {
+        const manifest = await this.collectInstalledPlugins();
+        const json = JSON.stringify(manifest, null, 2);
+        const content = new TextEncoder().encode(json).buffer;
+        return { githubPath: PLUGIN_MANIFEST_PATH, content };
+    }
+
+    private async installMissingPlugins(remoteManifest: PluginManifest): Promise<number> {
+        const local = await this.collectInstalledPlugins();
+        const localMap = new Map(local.plugins.map(p => [p.name, p.version]));
+        const toInstall = remoteManifest.plugins.filter(p =>
+            p.name !== PLUGIN_SELF_NAME && !localMap.has(p.name)
+        );
+        if (toInstall.length === 0) return 0;
+
+        let installed = 0;
+        for (let i = 0; i < toInstall.length; i++) {
+            const p = toInstall[i];
+            this.updateProgress(
+                90 + Math.round((i / toInstall.length) * 10),
+                `Installation plugin : ${i + 1}/${toInstall.length}`,
+                p.name
+            );
+            const ok = await this.installSinglePlugin(p.name);
+            if (ok) installed++;
+            await sleep(200);
+        }
+        return installed;
+    }
+
+    private async installSinglePlugin(pluginName: string): Promise<boolean> {
+        try {
+            const listRes = await fetch("/api/bazaar/getBazaarPlugin", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ frontend: "all", keyword: pluginName }),
+            });
+            const listJson = await listRes.json();
+            if (listJson.code !== 0 || !listJson.data?.packages) return false;
+
+            const pkg = listJson.data.packages.find((p: any) => p.name === pluginName);
+            if (!pkg) return false;
+
+            const installRes = await fetch("/api/bazaar/installBazaarPlugin", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    repoURL: pkg.repoURL,
+                    repoHash: pkg.repoHash,
+                    packageName: pkg.name,
+                    frontend: "all",
+                }),
+            });
+            const installJson = await installRes.json();
+            return installJson.code === 0;
+        } catch { return false; }
+    }
+
+    private async collectInstalledWidgets(): Promise<PluginManifest> {
+        const entries = await this.siYuanReadDir(`${SYNC_ROOT}/widgets`);
+        const plugins: PluginManifestEntry[] = [];
+        for (const e of entries) {
+            if (!e.isDir) continue;
+            try {
+                const raw = await this.siYuanGetFile(`${SYNC_ROOT}/widgets/${e.name}/widget.json`);
+                if (!raw) continue;
+                const text = new TextDecoder().decode(raw);
+                const json = JSON.parse(text);
+                if (json.name && json.version) {
+                    plugins.push({ name: json.name, version: json.version });
+                }
+            } catch { continue; }
+        }
+        return { plugins };
+    }
+
+    private async generateWidgetManifest(): Promise<{ githubPath: string; content: ArrayBuffer }> {
+        const manifest = await this.collectInstalledWidgets();
+        const json = JSON.stringify(manifest, null, 2);
+        const content = new TextEncoder().encode(json).buffer;
+        return { githubPath: WIDGET_MANIFEST_PATH, content };
+    }
+
+    private async installMissingWidgets(remoteManifest: PluginManifest): Promise<number> {
+        const local = await this.collectInstalledWidgets();
+        const localMap = new Map(local.plugins.map(p => [p.name, p.version]));
+        const toInstall = remoteManifest.plugins.filter(p => !localMap.has(p.name));
+        if (toInstall.length === 0) return 0;
+
+        let installed = 0;
+        for (let i = 0; i < toInstall.length; i++) {
+            const p = toInstall[i];
+            this.updateProgress(
+                90 + Math.round((i / toInstall.length) * 10),
+                `Installation widget : ${i + 1}/${toInstall.length}`,
+                p.name
+            );
+            const ok = await this.installSingleWidget(p.name);
+            if (ok) installed++;
+            await sleep(200);
+        }
+        return installed;
+    }
+
+    private async installSingleWidget(widgetName: string): Promise<boolean> {
+        try {
+            const listRes = await fetch("/api/bazaar/getBazaarWidget", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ keyword: widgetName }),
+            });
+            const listJson = await listRes.json();
+            if (listJson.code !== 0 || !listJson.data?.packages) return false;
+
+            const pkg = listJson.data.packages.find((p: any) => p.name === widgetName);
+            if (!pkg) return false;
+
+            const installRes = await fetch("/api/bazaar/installBazaarWidget", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    repoURL: pkg.repoURL,
+                    repoHash: pkg.repoHash,
+                    packageName: pkg.name,
+                }),
+            });
+            const installJson = await installRes.json();
+            return installJson.code === 0;
+        } catch { return false; }
+    }
+
     // ── GitHub APIs ──────────────────────────────────────────────────────────
 
     private async gh(path: string, method = "GET", body?: object) {
@@ -588,6 +750,10 @@ export default class GitHubSyncPlugin extends Plugin {
 
         try {
             const localFiles = await this.collectDir("/", SYNC_ROOT);
+            const pluginManifest = await this.generatePluginManifest();
+            const manifestSha = await calculateGitSha(pluginManifest.content);
+            const widgetManifest = await this.generateWidgetManifest();
+            const widgetManifestSha = await calculateGitSha(widgetManifest.content);
             const repoInfo = await (await this.gh(`/repos/${this.config.username}/${this.config.repo}`)).json();
             const branch = repoInfo.default_branch || "main";
 
@@ -606,6 +772,12 @@ export default class GitHubSyncPlugin extends Plugin {
             this.updateProgress(5, "Merge...", "Comparaison local / distant / dernière sync...");
             const plan = await this.mergeBeforePush(localFiles, remoteMap, lastCommitSha || "");
 
+            const remoteManifestSha = remoteMap.get(PLUGIN_MANIFEST_PATH);
+            const manifestChanged = remoteManifestSha !== manifestSha;
+
+            const remoteWidgetManifestSha = remoteMap.get(WIDGET_MANIFEST_PATH);
+            const widgetManifestChanged = remoteWidgetManifestSha !== widgetManifestSha;
+
             for (const pull of plan.toPull) {
                 const remoteContent = await this.ghDownloadFile(pull.githubPath, lastCommitSha || undefined);
                 if (remoteContent) await this.siYuanPutFile(pull.siYuanPath, remoteContent);
@@ -613,7 +785,7 @@ export default class GitHubSyncPlugin extends Plugin {
             }
 
             const totalChanges = plan.toUpload.length + plan.toDelete.length;
-            if (totalChanges === 0 && plan.conflicted.length === 0) {
+            if (totalChanges === 0 && plan.conflicted.length === 0 && !manifestChanged && !widgetManifestChanged) {
                 const newFilesState: Record<string, string> = {};
                 for (const r of plan.toReuse) newFilesState[r.githubPath] = r.sha;
                 await this.saveSyncedState(lastCommitSha || "", newFilesState);
@@ -627,7 +799,7 @@ export default class GitHubSyncPlugin extends Plugin {
 
             if (!lastCommitSha) {
                 if (this.config.showDiff) { const ok = await this.showDiffDialog(plan); if (!ok) { if (this.currentUI) this.currentUI.dialog.destroy(); this.activeTask = null; return; } }
-                await this.pushInitialCommit(plan, branch);
+                await this.pushInitialCommit(plan, branch, pluginManifest, widgetManifest);
                 return;
             }
 
@@ -655,6 +827,24 @@ export default class GitHubSyncPlugin extends Plugin {
             for (const d of plan.toDelete) {
                 treeItems.push({ path: d.githubPath, mode: "100644", sha: null });
                 uploadedSummaries.push({ path: d.githubPath, content: "(fichier supprimé)" });
+            }
+
+            this.updateProgress(85, "Upload manifeste plugins...", PLUGIN_MANIFEST_PATH);
+            const manifestBlobRes = await this.gh(`/repos/${this.config.username}/${this.config.repo}/git/blobs`, "POST", {
+                content: arrayBufferToBase64(pluginManifest.content), encoding: "base64"
+            });
+            if (manifestBlobRes.ok) {
+                const manifestBlobData = await manifestBlobRes.json();
+                treeItems.push({ path: PLUGIN_MANIFEST_PATH, mode: "100644", type: "blob", sha: manifestBlobData.sha });
+            }
+
+            this.updateProgress(87, "Upload manifeste widgets...", WIDGET_MANIFEST_PATH);
+            const widgetManifestBlobRes = await this.gh(`/repos/${this.config.username}/${this.config.repo}/git/blobs`, "POST", {
+                content: arrayBufferToBase64(widgetManifest.content), encoding: "base64"
+            });
+            if (widgetManifestBlobRes.ok) {
+                const widgetManifestBlobData = await widgetManifestBlobRes.json();
+                treeItems.push({ path: WIDGET_MANIFEST_PATH, mode: "100644", type: "blob", sha: widgetManifestBlobData.sha });
             }
 
             this.updateProgress(90, "Finalisation...", "Création de l'arbre...");
@@ -700,7 +890,7 @@ export default class GitHubSyncPlugin extends Plugin {
         } finally { this.activeTask = null; }
     }
 
-    private async pushInitialCommit(plan: MergePlan, branch: string) {
+    private async pushInitialCommit(plan: MergePlan, branch: string, pluginManifest: { githubPath: string; content: ArrayBuffer }, widgetManifest: { githubPath: string; content: ArrayBuffer }) {
         let uploaded = 0;
         const total = plan.toUpload.length;
         let errors = 0;
@@ -720,6 +910,22 @@ export default class GitHubSyncPlugin extends Plugin {
             uploaded++;
             if (uploaded % 5 === 0) await sleep(100);
         }
+
+        this.updateProgress(90, "Upload manifeste plugins...", pluginManifest.githubPath);
+        const manifestRes = await this.gh(`/repos/${this.config.username}/${this.config.repo}/contents/${encodePath(pluginManifest.githubPath)}`, "PUT", {
+            message: "Sync init : plugin manifest",
+            content: arrayBufferToBase64(pluginManifest.content),
+            branch,
+        });
+        if (!manifestRes.ok) errors++;
+
+        this.updateProgress(93, "Upload manifeste widgets...", widgetManifest.githubPath);
+        const widgetManifestRes = await this.gh(`/repos/${this.config.username}/${this.config.repo}/contents/${encodePath(widgetManifest.githubPath)}`, "PUT", {
+            message: "Sync init : widget manifest",
+            content: arrayBufferToBase64(widgetManifest.content),
+            branch,
+        });
+        if (!widgetManifestRes.ok) errors++;
 
         const newRefRes = await this.gh(`/repos/${this.config.username}/${this.config.repo}/git/refs/heads/${branch}`);
         if (newRefRes.ok) {
@@ -800,6 +1006,30 @@ export default class GitHubSyncPlugin extends Plugin {
 
             await this.siYuanRefreshFiletree();
 
+            let pluginsInstalled = 0;
+            const manifestItem = remoteItems.find(i => i.path === PLUGIN_MANIFEST_PATH);
+            if (manifestItem) {
+                const manifestContent = await this.ghDownloadFile(manifestItem.path);
+                if (manifestContent) {
+                    try {
+                        const manifest: PluginManifest = JSON.parse(new TextDecoder().decode(manifestContent));
+                        pluginsInstalled = await this.installMissingPlugins(manifest);
+                    } catch { /* manifeste invalide, on ignore */ }
+                }
+            }
+
+            let widgetsInstalled = 0;
+            const widgetManifestItem = remoteItems.find(i => i.path === WIDGET_MANIFEST_PATH);
+            if (widgetManifestItem) {
+                const widgetManifestContent = await this.ghDownloadFile(widgetManifestItem.path);
+                if (widgetManifestContent) {
+                    try {
+                        const wManifest: PluginManifest = JSON.parse(new TextDecoder().decode(widgetManifestContent));
+                        widgetsInstalled = await this.installMissingWidgets(wManifest);
+                    } catch { /* manifeste invalide, on ignore */ }
+                }
+            }
+
             const localFilesForDelete = await this.collectDir("/", SYNC_ROOT);
             const remotePathSet = new Set(remoteItems.map(i => i.path));
             let deleted = 0;
@@ -817,6 +1047,8 @@ export default class GitHubSyncPlugin extends Plugin {
             await this.saveSyncedState(refData.object.sha, newFilesState);
 
             let msg = `Pull terminé : ${updated} fichiers mis à jour, ${skipped} déjà à jour ou protégés, ${deleted} supprimé(s).`;
+            if (pluginsInstalled > 0) msg += ` 🔌 ${pluginsInstalled} plugin(s) installé(s).`;
+            if (widgetsInstalled > 0) msg += ` 🧩 ${widgetsInstalled} widget(s) installé(s).`;
             if (errors > 0) msg += ` ⚠️ ${errors} erreur(s).`;
             this.lastProgress = { ...this.lastProgress, finished: true, message: msg };
             if (this.currentUI) this.currentUI.finish(msg);
