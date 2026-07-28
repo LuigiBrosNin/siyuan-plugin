@@ -8,7 +8,7 @@ import {
     GitHubConfig, DEFAULT_CONFIG, STORAGE_KEY,
     SYNC_ROOT, SYNCED_STATE_KEY, MergePlan, FileToSync, ManifestFile,
     MAX_FILE_BYTES, SKIP_ROOT_DIRS, SKIP_PATH_FRAGMENTS, LOCKED_EXTENSIONS,
-    PLUGIN_MANIFEST_PATH, WIDGET_MANIFEST_PATH,
+    PLUGIN_MANIFEST_PATH, WIDGET_MANIFEST_PATH, THEME_MANIFEST_PATH,
 } from "./types";
 import {
     calculateGitSha, sleep, arrayBufferToBase64, encodePath,
@@ -20,8 +20,8 @@ import {
     siYuanRemoveFile, collectDir,
 } from "./siyuan-api";
 import {
-    generatePluginManifest, generateWidgetManifest, generateNotebookManifests,
-    installMissingPlugins, installMissingWidgets, processNotebookManifests,
+    generatePluginManifest, generateWidgetManifest, generateThemeManifest, generateNotebookManifests,
+    installMissingPlugins, installMissingWidgets, installMissingThemes, processNotebookManifests,
 } from "./manifests";
 import { SyncProgressUI, showDiffDialog } from "./ui";
 import { HistoryDialog } from "./history";
@@ -290,6 +290,8 @@ export default class GitHubSyncPlugin extends Plugin {
             const manifestSha = await calculateGitSha(pluginManifest.content);
             const widgetManifest = await generateWidgetManifest();
             const widgetManifestSha = await calculateGitSha(widgetManifest.content);
+            const themeManifest = await generateThemeManifest();
+            const themeManifestSha = await calculateGitSha(themeManifest.content);
             const notebookManifests = await generateNotebookManifests();
             const repoInfo = await (await api.getRepoInfo()).json();
             const branch = repoInfo.default_branch || "main";
@@ -315,6 +317,9 @@ export default class GitHubSyncPlugin extends Plugin {
             const remoteWidgetManifestSha = remoteMap.get(WIDGET_MANIFEST_PATH);
             const widgetManifestChanged = remoteWidgetManifestSha !== widgetManifestSha;
 
+            const remoteThemeManifestSha = remoteMap.get(THEME_MANIFEST_PATH);
+            const themeManifestChanged = remoteThemeManifestSha !== themeManifestSha;
+
             let notebookManifestsChanged = false;
             for (const nm of notebookManifests) {
                 const remoteNMSha = remoteMap.get(nm.githubPath);
@@ -329,7 +334,7 @@ export default class GitHubSyncPlugin extends Plugin {
             }
 
             const totalChanges = plan.toUpload.length + plan.toDelete.length;
-            if (totalChanges === 0 && plan.conflicted.length === 0 && !manifestChanged && !widgetManifestChanged && !notebookManifestsChanged) {
+            if (totalChanges === 0 && plan.conflicted.length === 0 && !manifestChanged && !widgetManifestChanged && !themeManifestChanged && !notebookManifestsChanged) {
                 const newFilesState: Record<string, string> = {};
                 for (const r of plan.toReuse) newFilesState[r.githubPath] = r.sha;
                 await this.saveSyncedState(lastCommitSha || "", newFilesState);
@@ -343,7 +348,7 @@ export default class GitHubSyncPlugin extends Plugin {
 
             if (!lastCommitSha) {
                 if (this.config.showDiff) { const ok = await showDiffDialog(plan); if (!ok) { if (this.currentUI) this.currentUI.destroy(); this.activeTask = null; return; } }
-                await this.pushInitialCommit(plan, branch, pluginManifest, widgetManifest, notebookManifests, api);
+                await this.pushInitialCommit(plan, branch, pluginManifest, widgetManifest, themeManifest, notebookManifests, api);
                 return;
             }
 
@@ -383,6 +388,13 @@ export default class GitHubSyncPlugin extends Plugin {
             if (widgetManifestBlobRes.ok) {
                 const widgetManifestBlobData = await widgetManifestBlobRes.json();
                 treeItems.push({ path: WIDGET_MANIFEST_PATH, mode: "100644", type: "blob", sha: widgetManifestBlobData.sha });
+            }
+
+            this.updateProgress(88, "Upload manifeste thèmes...", THEME_MANIFEST_PATH);
+            const themeManifestBlobRes = await api.createBlob(arrayBufferToBase64(themeManifest.content));
+            if (themeManifestBlobRes.ok) {
+                const themeManifestBlobData = await themeManifestBlobRes.json();
+                treeItems.push({ path: THEME_MANIFEST_PATH, mode: "100644", type: "blob", sha: themeManifestBlobData.sha });
             }
 
             let notebooksUploaded = 0;
@@ -436,6 +448,7 @@ export default class GitHubSyncPlugin extends Plugin {
     private async pushInitialCommit(
         plan: MergePlan, branch: string,
         pluginManifest: ManifestFile, widgetManifest: ManifestFile,
+        themeManifest: ManifestFile,
         notebookManifests: ManifestFile[], api: GitHubAPI,
     ) {
         let uploaded = 0;
@@ -461,6 +474,10 @@ export default class GitHubSyncPlugin extends Plugin {
         this.updateProgress(93, "Upload manifeste widgets...", widgetManifest.githubPath);
         const widgetManifestRes = await api.putContent(widgetManifest.githubPath, "Sync init : widget manifest", arrayBufferToBase64(widgetManifest.content), branch);
         if (!widgetManifestRes.ok) errors++;
+
+        this.updateProgress(94, "Upload manifeste thèmes...", themeManifest.githubPath);
+        const themeManifestRes = await api.putContent(themeManifest.githubPath, "Sync init : theme manifest", arrayBufferToBase64(themeManifest.content), branch);
+        if (!themeManifestRes.ok) errors++;
 
         let notebooksUploadedInit = 0;
         for (const nm of notebookManifests) {
@@ -582,6 +599,18 @@ export default class GitHubSyncPlugin extends Plugin {
                 }
             }
 
+            let themesInstalled = 0;
+            const themeManifestItem = remoteItems.find(i => i.path === THEME_MANIFEST_PATH);
+            if (themeManifestItem) {
+                const themeManifestContent = await api.downloadFile(themeManifestItem.path);
+                if (themeManifestContent) {
+                    try {
+                        const tManifest = JSON.parse(new TextDecoder().decode(themeManifestContent));
+                        themesInstalled = await installMissingThemes(tManifest, onProgress);
+                    } catch { /* ignore */ }
+                }
+            }
+
             let notebooksProcessed = 0;
             try {
                 notebooksProcessed = await processNotebookManifests(remoteItems, api, onProgress);
@@ -607,6 +636,7 @@ export default class GitHubSyncPlugin extends Plugin {
             let msg = `Pull terminé : ${updated} fichiers mis à jour, ${skipped} déjà à jour ou protégés, ${deleted} supprimé(s).`;
             if (pluginsInstalled > 0) msg += ` 🔌 ${pluginsInstalled} plugin(s) installé(s).`;
             if (widgetsInstalled > 0) msg += ` 🧩 ${widgetsInstalled} widget(s) installé(s).`;
+            if (themesInstalled > 0) msg += ` 🎨 ${themesInstalled} thème(s) installé(s).`;
             if (notebooksProcessed > 0) msg += ` 📓 ${notebooksProcessed} carnet(s) ouvert(s).`;
             if (errors > 0) msg += ` ⚠️ ${errors} erreur(s).`;
             this.lastProgress = { ...this.lastProgress, finished: true, message: msg };
@@ -652,9 +682,14 @@ export default class GitHubSyncPlugin extends Plugin {
                 siPath.includes("/temp/") || SKIP_PATH_FRAGMENTS.some(f => siPath.includes(f)) ||
                 siPath.endsWith(".siyuan.sy")) continue;
 
+            let writePath = siPath;
+            if (isThemePath(item.path)) {
+                writePath = themeGithubToLocal(item.path);
+            }
+
             const content = await api.downloadFile(item.path, sha);
             if (content && content.byteLength > 0) {
-                await siYuanPutFile(siPath, content);
+                await siYuanPutFile(writePath, content);
                 updated++;
             }
             await sleep(30);

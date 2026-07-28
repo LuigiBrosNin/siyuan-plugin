@@ -1,8 +1,8 @@
 import {
     PluginManifest, PluginManifestEntry, NotebookManifestEntry, GitHubTreeItem, ManifestFile,
-    SYNC_ROOT, NOTEBOOK_MANIFEST_FILE, PLUGIN_MANIFEST_PATH, WIDGET_MANIFEST_PATH, PLUGIN_SELF_NAME,
+    SYNC_ROOT, NOTEBOOK_MANIFEST_FILE, PLUGIN_MANIFEST_PATH, WIDGET_MANIFEST_PATH, THEME_MANIFEST_PATH, PLUGIN_SELF_NAME,
 } from "./types";
-import { siYuanReadDir, siYuanGetFile, siYuanListNotebooks, siYuanGetNotebookConf, siYuanOpenNotebook, siYuanSetNotebookConf, installSinglePlugin, installSingleWidget } from "./siyuan-api";
+import { siYuanReadDir, siYuanGetFile, siYuanListNotebooks, siYuanGetNotebookConf, siYuanOpenNotebook, siYuanSetNotebookConf, installSinglePlugin, installSingleWidget, installSingleTheme, getCurrentAppearance, setActiveTheme } from "./siyuan-api";
 import { GitHubAPI } from "./github-api";
 import { sleep } from "./utils";
 
@@ -103,6 +103,75 @@ export async function installMissingWidgets(
         if (ok) installed++;
         await sleep(200);
     }
+    return installed;
+}
+
+export async function collectInstalledThemes(includeActive = false): Promise<any> {
+    const THEMES_DIR = "conf/appearance/themes";
+    const entries = await siYuanReadDir(THEMES_DIR);
+    const plugins: PluginManifestEntry[] = [];
+    for (const e of entries) {
+        if (!e.isDir) continue;
+        try {
+            const raw = await siYuanGetFile(`${THEMES_DIR}/${e.name}/theme.json`);
+            if (!raw) continue;
+            const text = new TextDecoder().decode(raw);
+            const json = JSON.parse(text);
+            if (json.name && json.version) {
+                plugins.push({ name: json.name, version: json.version });
+            }
+        } catch { continue; }
+    }
+    const result: any = { plugins };
+    if (includeActive) {
+        const appearance = await getCurrentAppearance();
+        if (appearance) {
+            result.themeLight = appearance.themeLight;
+            result.themeDark = appearance.themeDark;
+        }
+    }
+    return result;
+}
+
+export async function generateThemeManifest(): Promise<ManifestFile> {
+    const manifest = await collectInstalledThemes(true);
+    const json = JSON.stringify(manifest, null, 2);
+    const content = new TextEncoder().encode(json).buffer;
+    return { githubPath: THEME_MANIFEST_PATH, content };
+}
+
+export async function installMissingThemes(
+    remoteManifest: any,
+    onProgress?: (pct: number, status: string, details: string) => void,
+): Promise<number> {
+    const local = await collectInstalledThemes();
+    const localMap = new Map(local.plugins.map((p: PluginManifestEntry) => [p.name, p.version]));
+    const toInstall = remoteManifest.plugins?.filter((p: PluginManifestEntry) => !localMap.has(p.name)) ?? [];
+    if (toInstall.length === 0) return 0;
+
+    const appearance = await getCurrentAppearance();
+    const currentMode = appearance?.mode ?? 0;
+
+    let installed = 0;
+    for (let i = 0; i < toInstall.length; i++) {
+        const p = toInstall[i];
+        if (onProgress) onProgress(
+            90 + Math.round((i / toInstall.length) * 10),
+            `Installation thème : ${i + 1}/${toInstall.length}`,
+            p.name
+        );
+        const ok = await installSingleTheme(p.name, currentMode);
+        if (ok) installed++;
+        await sleep(200);
+    }
+
+    if (installed > 0 && remoteManifest.themeLight) {
+        await setActiveTheme(remoteManifest.themeLight, 0);
+    }
+    if (installed > 0 && remoteManifest.themeDark) {
+        await setActiveTheme(remoteManifest.themeDark, 1);
+    }
+
     return installed;
 }
 

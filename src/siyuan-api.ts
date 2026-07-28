@@ -87,6 +87,37 @@ export async function siYuanSetNotebookConf(notebookId: string, conf: any): Prom
     } catch { return false; }
 }
 
+export async function getCurrentAppearance(): Promise<{ mode: number; themeLight: string; themeDark: string } | null> {
+    try {
+        const res = await fetch("/api/system/getConf", { method: "POST", body: "{}" });
+        const json = await res.json();
+        if (json.code !== 0 || !json.data?.appearance) return null;
+        const a = json.data.appearance;
+        return { mode: a.mode ?? 0, themeLight: a.themeLight ?? "", themeDark: a.themeDark ?? "" };
+    } catch { return null; }
+}
+
+export async function setActiveTheme(themeDir: string, mode: number): Promise<boolean> {
+    try {
+        const confRes = await fetch("/api/system/getConf", { method: "POST", body: "{}" });
+        const confJson = await confRes.json();
+        if (confJson.code !== 0 || !confJson.data?.appearance) return false;
+
+        const app = { ...confJson.data.appearance };
+        if (mode === 0) app.themeLight = themeDir;
+        else app.themeDark = themeDir;
+        app.mode = mode;
+
+        const res = await fetch("/api/setting/setAppearance", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ appearance: app }),
+        });
+        const json = await res.json();
+        return json.code === 0;
+    } catch { return false; }
+}
+
 export async function installSinglePlugin(pluginName: string): Promise<boolean> {
     try {
         const listRes = await fetch("/api/bazaar/getBazaarPlugin", {
@@ -135,6 +166,34 @@ export async function installSingleWidget(widgetName: string): Promise<boolean> 
                 repoURL: pkg.repoURL,
                 repoHash: pkg.repoHash,
                 packageName: pkg.name,
+            }),
+        });
+        const installJson = await installRes.json();
+        return installJson.code === 0;
+    } catch { return false; }
+}
+
+export async function installSingleTheme(themeName: string, mode = 0): Promise<boolean> {
+    try {
+        const listRes = await fetch("/api/bazaar/getBazaarTheme", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ keyword: themeName }),
+        });
+        const listJson = await listRes.json();
+        if (listJson.code !== 0 || !listJson.data?.packages) return false;
+
+        const pkg = listJson.data.packages.find((p: any) => p.name === themeName);
+        if (!pkg) return false;
+
+        const installRes = await fetch("/api/bazaar/installBazaarTheme", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                repoURL: pkg.repoURL,
+                repoHash: pkg.repoHash,
+                packageName: pkg.name,
+                mode,
             }),
         });
         const installJson = await installRes.json();

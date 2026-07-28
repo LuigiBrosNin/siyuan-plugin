@@ -19,6 +19,7 @@ export const SYNCED_STATE_KEY  = "github-sync-state.json";
 
 export const PLUGIN_MANIFEST_PATH = `${SYNC_ROOT}/plugin-manifest.json`;
 export const WIDGET_MANIFEST_PATH = `${SYNC_ROOT}/widget-manifest.json`;
+export const THEME_MANIFEST_PATH  = `${SYNC_ROOT}/theme-manifest.json`;
 export const NOTEBOOK_MANIFEST_FILE = "notebook.json";
 export const PLUGIN_SELF_NAME     = "siyuan-github-sync";
 
