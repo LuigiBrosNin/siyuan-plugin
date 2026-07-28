@@ -30,6 +30,7 @@ const SYNCED_STATE_KEY  = "github-sync-state.json";
 
 const PLUGIN_MANIFEST_PATH = `${SYNC_ROOT}/plugin-manifest.json`;
 const WIDGET_MANIFEST_PATH = `${SYNC_ROOT}/widget-manifest.json`;
+const NOTEBOOK_MANIFEST_FILE = "notebook.json";
 const PLUGIN_SELF_NAME     = "siyuan-github-sync";
 
 // ─── Interfaces ───────────────────────────────────────────────────────────────
@@ -85,6 +86,11 @@ interface PluginManifestEntry {
 
 interface PluginManifest {
     plugins: PluginManifestEntry[];
+}
+
+interface NotebookManifestEntry {
+    id: string;
+    name: string;
 }
 
 // ─── Utilitaires ─────────────────────────────────────────────────────────────
@@ -434,6 +440,111 @@ export default class GitHubSyncPlugin extends Plugin {
         } catch { return false; }
     }
 
+    private async siYuanListNotebooks(): Promise<NotebookManifestEntry[]> {
+        try {
+            const res = await fetch("/api/notebook/lsNotebooks", { method: "POST", body: "{}" });
+            const json = await res.json();
+            if (json.code !== 0 || !json.data?.notebooks) return [];
+            return json.data.notebooks.map((nb: any) => ({ id: nb.id, name: nb.name || "" }));
+        } catch { return []; }
+    }
+
+    private async siYuanOpenNotebook(notebookId: string): Promise<boolean> {
+        try {
+            const res = await fetch("/api/notebook/openNotebook", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ notebook: notebookId }),
+            });
+            const json = await res.json();
+            return json.code === 0;
+        } catch { return false; }
+    }
+
+    private async siYuanGetNotebookConf(notebookId: string): Promise<any> {
+        try {
+            const res = await fetch("/api/notebook/getNotebookConf", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ notebook: notebookId }),
+            });
+            const json = await res.json();
+            return json.code === 0 ? json.data : null;
+        } catch { return null; }
+    }
+
+    private async siYuanSetNotebookConf(notebookId: string, conf: any): Promise<boolean> {
+        try {
+            const res = await fetch("/api/notebook/setNotebookConf", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ notebook: notebookId, conf }),
+            });
+            const json = await res.json();
+            return json.code === 0;
+        } catch { return false; }
+    }
+
+    private async collectNotebookManifests(): Promise<NotebookManifestEntry[]> {
+        const notebooks = await this.siYuanListNotebooks();
+        const entries: NotebookManifestEntry[] = [];
+        for (const nb of notebooks) {
+            const conf = await this.siYuanGetNotebookConf(nb.id);
+            const name = conf?.conf?.name || conf?.name || nb.name;
+            if (name) entries.push({ id: nb.id, name });
+        }
+        return entries;
+    }
+
+    private async generateNotebookManifests(): Promise<{ githubPath: string; content: ArrayBuffer }[]> {
+        const notebooks = await this.collectNotebookManifests();
+        return notebooks.map(nb => {
+            const json = JSON.stringify({ id: nb.id, name: nb.name }, null, 2);
+            const content = new TextEncoder().encode(json).buffer;
+            return { githubPath: `${SYNC_ROOT}/${nb.id}/${NOTEBOOK_MANIFEST_FILE}`, content };
+        });
+    }
+
+    private async processNotebookManifests(remoteItems: GitHubTreeItem[]): Promise<number> {
+        const manifestItems = remoteItems.filter(i =>
+            i.type === "blob" &&
+            i.path.startsWith(`${SYNC_ROOT}/`) &&
+            i.path.endsWith(`/${NOTEBOOK_MANIFEST_FILE}`)
+        );
+        if (manifestItems.length === 0) return 0;
+
+        let processed = 0;
+        for (let i = 0; i < manifestItems.length; i++) {
+            const item = manifestItems[i];
+            const notebookId = item.path.split("/")[1];
+            if (!notebookId) continue;
+
+            this.updateProgress(
+                90 + Math.round((i / manifestItems.length) * 10),
+                `Carnet : ${i + 1}/${manifestItems.length}`,
+                notebookId
+            );
+
+            const content = await this.ghDownloadFile(item.path);
+            if (!content) continue;
+
+            try {
+                const manifest: NotebookManifestEntry = JSON.parse(new TextDecoder().decode(content));
+                if (!manifest.name) continue;
+
+                await this.siYuanOpenNotebook(notebookId);
+                const confData = await this.siYuanGetNotebookConf(notebookId);
+                if (confData?.conf) {
+                    confData.conf.name = manifest.name;
+                    await this.siYuanSetNotebookConf(notebookId, confData.conf);
+                }
+                processed++;
+                await sleep(50);
+            } catch { continue; }
+        }
+        return processed;
+    }
+
     private async collectDir(siBase: string, ghBase: string): Promise<FileToSync[]> {
         const entries = await this.siYuanReadDir(siBase);
         const files: FileToSync[] = [];
@@ -754,6 +865,8 @@ export default class GitHubSyncPlugin extends Plugin {
             const manifestSha = await calculateGitSha(pluginManifest.content);
             const widgetManifest = await this.generateWidgetManifest();
             const widgetManifestSha = await calculateGitSha(widgetManifest.content);
+            const notebookManifests = await this.generateNotebookManifests();
+            const notebookManifestMap = new Map(notebookManifests.map(nm => [nm.githubPath, nm]));
             const repoInfo = await (await this.gh(`/repos/${this.config.username}/${this.config.repo}`)).json();
             const branch = repoInfo.default_branch || "main";
 
@@ -778,6 +891,13 @@ export default class GitHubSyncPlugin extends Plugin {
             const remoteWidgetManifestSha = remoteMap.get(WIDGET_MANIFEST_PATH);
             const widgetManifestChanged = remoteWidgetManifestSha !== widgetManifestSha;
 
+            let notebookManifestsChanged = false;
+            for (const nm of notebookManifests) {
+                const remoteNMSha = remoteMap.get(nm.githubPath);
+                const localNMSha = await calculateGitSha(nm.content);
+                if (remoteNMSha !== localNMSha) { notebookManifestsChanged = true; break; }
+            }
+
             for (const pull of plan.toPull) {
                 const remoteContent = await this.ghDownloadFile(pull.githubPath, lastCommitSha || undefined);
                 if (remoteContent) await this.siYuanPutFile(pull.siYuanPath, remoteContent);
@@ -785,7 +905,7 @@ export default class GitHubSyncPlugin extends Plugin {
             }
 
             const totalChanges = plan.toUpload.length + plan.toDelete.length;
-            if (totalChanges === 0 && plan.conflicted.length === 0 && !manifestChanged && !widgetManifestChanged) {
+            if (totalChanges === 0 && plan.conflicted.length === 0 && !manifestChanged && !widgetManifestChanged && !notebookManifestsChanged) {
                 const newFilesState: Record<string, string> = {};
                 for (const r of plan.toReuse) newFilesState[r.githubPath] = r.sha;
                 await this.saveSyncedState(lastCommitSha || "", newFilesState);
@@ -799,7 +919,7 @@ export default class GitHubSyncPlugin extends Plugin {
 
             if (!lastCommitSha) {
                 if (this.config.showDiff) { const ok = await this.showDiffDialog(plan); if (!ok) { if (this.currentUI) this.currentUI.dialog.destroy(); this.activeTask = null; return; } }
-                await this.pushInitialCommit(plan, branch, pluginManifest, widgetManifest);
+                await this.pushInitialCommit(plan, branch, pluginManifest, widgetManifest, notebookManifests);
                 return;
             }
 
@@ -847,6 +967,18 @@ export default class GitHubSyncPlugin extends Plugin {
                 treeItems.push({ path: WIDGET_MANIFEST_PATH, mode: "100644", type: "blob", sha: widgetManifestBlobData.sha });
             }
 
+            let notebooksUploaded = 0;
+            for (const nm of notebookManifests) {
+                this.updateProgress(88, `Upload manifeste carnet (${++notebooksUploaded}/${notebookManifests.length})...`, nm.githubPath);
+                const nmBlobRes = await this.gh(`/repos/${this.config.username}/${this.config.repo}/git/blobs`, "POST", {
+                    content: arrayBufferToBase64(nm.content), encoding: "base64"
+                });
+                if (nmBlobRes.ok) {
+                    const nmBlobData = await nmBlobRes.json();
+                    treeItems.push({ path: nm.githubPath, mode: "100644", type: "blob", sha: nmBlobData.sha });
+                }
+            }
+
             this.updateProgress(90, "Finalisation...", "Création de l'arbre...");
             const baseTreeRes = await this.gh(`/repos/${this.config.username}/${this.config.repo}/git/commits/${lastCommitSha}`);
             const baseTreeData = await baseTreeRes.json();
@@ -890,7 +1022,7 @@ export default class GitHubSyncPlugin extends Plugin {
         } finally { this.activeTask = null; }
     }
 
-    private async pushInitialCommit(plan: MergePlan, branch: string, pluginManifest: { githubPath: string; content: ArrayBuffer }, widgetManifest: { githubPath: string; content: ArrayBuffer }) {
+    private async pushInitialCommit(plan: MergePlan, branch: string, pluginManifest: { githubPath: string; content: ArrayBuffer }, widgetManifest: { githubPath: string; content: ArrayBuffer }, notebookManifests: { githubPath: string; content: ArrayBuffer }[] = []) {
         let uploaded = 0;
         const total = plan.toUpload.length;
         let errors = 0;
@@ -926,6 +1058,22 @@ export default class GitHubSyncPlugin extends Plugin {
             branch,
         });
         if (!widgetManifestRes.ok) errors++;
+
+        let notebooksUploadedInit = 0;
+        for (const nm of notebookManifests) {
+            this.updateProgress(95 + Math.round((notebooksUploadedInit / notebookManifests.length) * 4), `Upload manifeste carnet ${notebooksUploadedInit + 1}/${notebookManifests.length}...`, nm.githubPath);
+            const nmRes = await this.gh(`/repos/${this.config.username}/${this.config.repo}/contents/${encodePath(nm.githubPath)}`, "PUT", {
+                message: `Sync init : ${nm.githubPath}`,
+                content: arrayBufferToBase64(nm.content),
+                branch,
+            });
+            if (!nmRes.ok) {
+                const errText = await nmRes.json().catch(() => ({ message: "unknown" }));
+                console.error(`[GitHub Sync] Erreur upload ${nm.githubPath}:`, errText.message);
+                errors++;
+            }
+            notebooksUploadedInit++;
+        }
 
         const newRefRes = await this.gh(`/repos/${this.config.username}/${this.config.repo}/git/refs/heads/${branch}`);
         if (newRefRes.ok) {
@@ -1030,6 +1178,12 @@ export default class GitHubSyncPlugin extends Plugin {
                 }
             }
 
+            let notebooksProcessed = 0;
+            try {
+                notebooksProcessed = await this.processNotebookManifests(remoteItems);
+                await this.siYuanRefreshFiletree();
+            } catch { /* erreur ignorée */ }
+
             const localFilesForDelete = await this.collectDir("/", SYNC_ROOT);
             const remotePathSet = new Set(remoteItems.map(i => i.path));
             let deleted = 0;
@@ -1049,6 +1203,7 @@ export default class GitHubSyncPlugin extends Plugin {
             let msg = `Pull terminé : ${updated} fichiers mis à jour, ${skipped} déjà à jour ou protégés, ${deleted} supprimé(s).`;
             if (pluginsInstalled > 0) msg += ` 🔌 ${pluginsInstalled} plugin(s) installé(s).`;
             if (widgetsInstalled > 0) msg += ` 🧩 ${widgetsInstalled} widget(s) installé(s).`;
+            if (notebooksProcessed > 0) msg += ` 📓 ${notebooksProcessed} carnet(s) ouvert(s).`;
             if (errors > 0) msg += ` ⚠️ ${errors} erreur(s).`;
             this.lastProgress = { ...this.lastProgress, finished: true, message: msg };
             if (this.currentUI) this.currentUI.finish(msg);
@@ -1147,6 +1302,11 @@ export default class GitHubSyncPlugin extends Plugin {
         }
 
         await this.siYuanRefreshFiletree();
+
+        try {
+            const notebooksProcessed = await this.processNotebookManifests(treeItems);
+            if (notebooksProcessed > 0) await this.siYuanRefreshFiletree();
+        } catch { /* erreur ignorée */ }
 
         const newFilesState: Record<string, string> = {};
         treeItems.forEach(item => { if (item.type === "blob") newFilesState[item.path] = item.sha; });
