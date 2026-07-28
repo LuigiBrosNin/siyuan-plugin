@@ -187,9 +187,10 @@ class SyncProgressUI {
         if (this.detailsElement) this.detailsElement.textContent = details;
     }
 
-    finish(message: string) {
+    finish(message: string, showButton = true) {
         if (this.isDestroyed) return;
         this.update(100, "✅ Terminé", message);
+        if (!showButton) return;
         const content = this.dialog.element.querySelector(".b3-dialog__content");
         if (content && !content.querySelector(".b3-dialog__action")) {
             const footer = document.createElement("div");
@@ -1206,7 +1207,7 @@ export default class GitHubSyncPlugin extends Plugin {
             if (notebooksProcessed > 0) msg += ` 📓 ${notebooksProcessed} carnet(s) ouvert(s).`;
             if (errors > 0) msg += ` ⚠️ ${errors} erreur(s).`;
             this.lastProgress = { ...this.lastProgress, finished: true, message: msg };
-            if (this.currentUI) this.currentUI.finish(msg);
+            if (this.currentUI) this.currentUI.finish(msg, false);
             await this.saveSyncTimestamp();
             setTimeout(() => window.location.reload(), 1500);
         } catch (e) {
