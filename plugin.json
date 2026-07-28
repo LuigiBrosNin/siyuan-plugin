@@ -29,6 +29,11 @@
   "readme": {
     "default": "README.md"
   },
+  "funding": {
+    "custom": [
+      "https://paypal.me/CyprienPisicchio"
+    ]
+  },
   "keywords": [
     "sync",
     "github",
