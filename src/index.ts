@@ -2,214 +2,29 @@ import {
     Plugin,
     Setting,
     showMessage,
-    getFrontend,
-    Dialog,
 } from "siyuan";
 import "./index.scss";
-
-// ─── Constantes ───────────────────────────────────────────────────────────────
-
-const STORAGE_KEY    = "github-sync-config.json";
-const GITHUB_API     = "https://api.github.com";
-const SYNC_ROOT      = "data";
-const MAX_FILE_BYTES = 25_000_000; // 25 MB
-
-const SKIP_ROOT_DIRS = [
-    "plugins", "conf", ".siyuan", "storage", "emojis",
-    "public", "templates", "widgets", "siyuan-github-sync",
-    "history",
-];
-
-const SKIP_PATH_FRAGMENTS = [
-    ".git/",
-    "/temp/",
-];
-
-const LOCKED_EXTENSIONS = [".db", ".db-shm", ".db-wal", ".log", ".lock"];
-const SYNCED_STATE_KEY  = "github-sync-state.json";
-
-const PLUGIN_MANIFEST_PATH = `${SYNC_ROOT}/plugin-manifest.json`;
-const WIDGET_MANIFEST_PATH = `${SYNC_ROOT}/widget-manifest.json`;
-const NOTEBOOK_MANIFEST_FILE = "notebook.json";
-const PLUGIN_SELF_NAME     = "siyuan-github-sync";
-
-// ─── Interfaces ───────────────────────────────────────────────────────────────
-
-interface GitHubConfig {
-    username: string;
-    repo: string;
-    token: string;
-    groqKey: string;
-    showDiff: boolean;
-    lastSync?: number;
-}
-
-const DEFAULT_CONFIG: GitHubConfig = { username: "", repo: "", token: "", groqKey: "", showDiff: true };
-
-interface SiYuanDirEntry {
-    name:    string;
-    isDir:   boolean;
-    updated: number;
-}
-
-interface GitHubTreeItem {
-    path: string;
-    mode: string;
-    type: "blob" | "tree";
-    sha:  string;
-    size?: number;
-}
-
-interface FileToSync {
-    siYuanPath: string;
-    githubPath: string;
-}
-
-interface SyncedState {
-    commitSha: string;
-    files: Record<string, string>; // githubPath → SHA
-}
-
-interface MergePlan {
-    toUpload:    { githubPath: string; content: ArrayBuffer }[];
-    toReuse:     { githubPath: string; sha: string }[];
-    toDelete:    { githubPath: string }[];
-    toPull:      { githubPath: string; siYuanPath: string }[];
-    conflicted:  { githubPath: string; siYuanPath: string }[];
-    skippedLarge: number;
-}
-
-interface PluginManifestEntry {
-    name: string;
-    version: string;
-}
-
-interface PluginManifest {
-    plugins: PluginManifestEntry[];
-}
-
-interface NotebookManifestEntry {
-    id: string;
-    name: string;
-}
-
-// ─── Utilitaires ─────────────────────────────────────────────────────────────
-
-function arrayBufferToBase64(buffer: ArrayBuffer): string {
-    const bytes = new Uint8Array(buffer);
-    let bin = "";
-    const CHUNK = 8192;
-    for (let i = 0; i < bytes.byteLength; i += CHUNK) {
-        bin += String.fromCharCode(...(bytes.subarray(i, i + CHUNK) as unknown as number[]));
-    }
-    return btoa(bin);
-}
-
-function base64ToArrayBuffer(b64: string): ArrayBuffer {
-    const bin   = atob(b64.replace(/\s/g, ""));
-    const bytes = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-    return bytes.buffer;
-}
-
-/** Calcule le SHA-1 d'un blob Git (format: "blob [size]\0[content]") */
-async function calculateGitSha(content: ArrayBuffer): Promise<string> {
-    const header = new TextEncoder().encode(`blob ${content.byteLength}\0`);
-    const combined = new Uint8Array(header.length + content.byteLength);
-    combined.set(header);
-    combined.set(new Uint8Array(content), header.length);
-    const hashBuffer = await crypto.subtle.digest("SHA-1", combined);
-    return Array.from(new Uint8Array(hashBuffer)).map(b => b.toString(16).padStart(2, "0")).join("");
-}
-
-function sleep(ms: number): Promise<void> {
-    return new Promise(r => setTimeout(r, ms));
-}
-
-function encodePath(path: string): string {
-    return path.split("/").map(encodeURIComponent).join("/");
-}
-
-function sanitizeForDisplay(s: string): string {
-    return s.replace(/[<>&"']/g, c => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;", "'": "&#39;" })[c] || c);
-}
-
-function friendlyError(err: unknown): string {
-    const raw = err instanceof Error ? err.message : String(err);
-    const msg = raw.toLowerCase();
-    if (msg.includes("bad credentials") || msg.includes("401") || msg.includes("token")) return "❌ Token GitHub invalide ou expiré. Va dans Paramètres → génère un nouveau token.";
-    if (msg.includes("not found") || msg.includes("404")) return "❌ Dépôt GitHub introuvable. Vérifie le nom du dépôt dans Paramètres.";
-    if (msg.includes("networkerror") || msg.includes("failed to fetch") || msg.includes("network")) return "❌ Pas de connexion internet. Vérifie ta connexion.";
-    if (msg.includes("rate limit") || msg.includes("403")) return "❌ Limite d'appels API GitHub atteinte. Réessaie dans 1 minute.";
-    if (msg.includes("aborted") || msg.includes("timeout")) return "❌ Requête annulée (timeout). Réessaie.";
-    if (msg.includes("size") || msg.includes("large")) return "❌ Fichier trop volumineux (>25 Mo). Ignoré.";
-    return `❌ ${sanitizeForDisplay(raw)}`;
-}
-
-// ─── UI de Progression ────────────────────────────────────────────────────────
-
-class SyncProgressUI {
-    private dialog: Dialog;
-    private barElement: HTMLElement;
-    private statusElement: HTMLElement;
-    private detailsElement: HTMLElement;
-    public isDestroyed = false;
-
-    constructor(title: string, onClosed: () => void) {
-        this.dialog = new Dialog({
-            title,
-            content: `
-                <div class="b3-dialog__content" style="padding: 24px;">
-                    <div id="sync-status" style="font-weight: bold; margin-bottom: 12px; color: var(--b3-theme-on-background);">Initialisation...</div>
-                    <div style="height: 12px; background: var(--b3-border-color); border-radius: 6px; overflow: hidden; margin-bottom: 12px;">
-                        <div id="sync-bar" style="width: 0%; height: 100%; background: var(--b3-theme-primary); transition: width 0.3s ease;"></div>
-                    </div>
-                    <div id="sync-details" style="font-size: 11px; opacity: 0.7; line-height: 1.4; word-break: break-all; min-height: 32px; font-family: monospace;">
-                        Vérification des fichiers...
-                    </div>
-                </div>
-            `,
-            width: window.innerWidth < 600 ? `${window.innerWidth - 32}px` : "500px",
-            destroyCallback: () => {
-                this.isDestroyed = true;
-                onClosed();
-            }
-        });
-        this.statusElement  = this.dialog.element.querySelector("#sync-status");
-        this.barElement     = this.dialog.element.querySelector("#sync-bar");
-        this.detailsElement = this.dialog.element.querySelector("#sync-details");
-    }
-
-    update(percent: number, status: string, details: string) {
-        if (this.isDestroyed) return;
-        if (this.statusElement)  this.statusElement.textContent  = status;
-        if (this.barElement)     this.barElement.style.width    = `${percent}%`;
-        if (this.detailsElement) this.detailsElement.textContent = details;
-    }
-
-    finish(message: string, showButton = true) {
-        if (this.isDestroyed) return;
-        this.update(100, "✅ Terminé", message);
-        if (!showButton) return;
-        const content = this.dialog.element.querySelector(".b3-dialog__content");
-        if (content && !content.querySelector(".b3-dialog__action")) {
-            const footer = document.createElement("div");
-            footer.className = "b3-dialog__action";
-            footer.style.marginTop = "16px";
-            footer.innerHTML = `<button class="b3-button b3-button--outline">Fermer</button>`;
-            (footer.querySelector(".b3-button--outline") as HTMLElement).onclick = () => this.dialog.destroy();
-            content.appendChild(footer);
-        }
-    }
-
-    error(message: string) {
-        if (this.isDestroyed) return;
-        this.update(100, "❌ Erreur", message);
-        if (this.barElement) this.barElement.style.background = "var(--b3-theme-error)";
-    }
-}
-
-// ─── Plugin ───────────────────────────────────────────────────────────────────
+import {
+    GitHubConfig, DEFAULT_CONFIG, STORAGE_KEY,
+    SYNC_ROOT, SYNCED_STATE_KEY, MergePlan, FileToSync, ManifestFile,
+    MAX_FILE_BYTES, SKIP_ROOT_DIRS, SKIP_PATH_FRAGMENTS, LOCKED_EXTENSIONS,
+    PLUGIN_MANIFEST_PATH, WIDGET_MANIFEST_PATH,
+} from "./types";
+import {
+    calculateGitSha, sleep, arrayBufferToBase64, encodePath,
+    friendlyError, extractTextFromSyFile, generateCommitMessage,
+} from "./utils";
+import { GitHubAPI } from "./github-api";
+import {
+    siYuanGetFile, siYuanPutFile, siYuanRefreshFiletree,
+    siYuanRemoveFile, collectDir,
+} from "./siyuan-api";
+import {
+    generatePluginManifest, generateWidgetManifest, generateNotebookManifests,
+    installMissingPlugins, installMissingWidgets, processNotebookManifests,
+} from "./manifests";
+import { SyncProgressUI, showDiffDialog } from "./ui";
+import { HistoryDialog } from "./history";
 
 export default class GitHubSyncPlugin extends Plugin {
     private config: GitHubConfig = { ...DEFAULT_CONFIG };
@@ -217,6 +32,7 @@ export default class GitHubSyncPlugin extends Plugin {
     private currentUI: SyncProgressUI | null = null;
     private lastProgress = { percent: 0, status: "Initialisation...", details: "", finished: false, error: false, message: "" };
     private statusBarEl: HTMLElement | null = null;
+
     async onload() {
         this.addIcons(`<symbol id="iconGitHubUpload" viewBox="0 0 24 24"><path fill="currentColor" d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 13v-4H8l4-4 4 4h-3v4h-2z"/></symbol><symbol id="iconGitHubDownload" viewBox="0 0 24 24"><path fill="currentColor" d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 7v4h3l-4 4-4-4h3V9h2z"/></symbol><symbol id="iconGitHistory" viewBox="0 0 24 24"><path fill="currentColor" d="M13 3a9 9 0 0 0-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42A8.954 8.954 0 0 0 13 21a9 9 0 0 0 0-18zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z"/></symbol>`);
         const saved = await this.loadData(STORAGE_KEY);
@@ -286,7 +102,8 @@ export default class GitHubSyncPlugin extends Plugin {
         tBtn.textContent = "🔍 Tester GitHub";
         tBtn.onclick = async () => {
             tBtn.disabled = true;
-            if (await this.testConnection(uIn.value, rIn.value, tIn.value)) showMessage("✅ OK"); else showMessage("❌ Erreur", 6000, "error");
+            const api = new GitHubAPI(tIn.value.trim(), uIn.value, rIn.value);
+            if (await api.testConnection()) showMessage("✅ OK"); else showMessage("❌ Erreur", 6000, "error");
             tBtn.disabled = false;
         };
 
@@ -360,13 +177,6 @@ export default class GitHubSyncPlugin extends Plugin {
         return el;
     }
 
-    private async testConnection(u: string, r: string, t: string) {
-        try {
-            const res = await fetch(`${GITHUB_API}/repos/${u}/${r}`, { headers: { Authorization: `Bearer ${t}`, Accept: "application/vnd.github+json" } });
-            return res.status === 200;
-        } catch { return false; }
-    }
-
     // ── Actions UI ───────────────────────────────────────────────────────────
 
     private handlePushClick() {
@@ -397,338 +207,7 @@ export default class GitHubSyncPlugin extends Plugin {
         if (this.currentUI) this.currentUI.update(percent, status, details);
     }
 
-    // ── SiYuan APIs ──────────────────────────────────────────────────────────
-
-    private async siYuanReadDir(path: string): Promise<SiYuanDirEntry[]> {
-        try {
-            const res = await fetch("/api/file/readDir", { method: "POST", body: JSON.stringify({ path }) });
-            const json = await res.json();
-            return (json.code === 0 && json.data) ? json.data : [];
-        } catch { return []; }
-    }
-
-    private async siYuanGetFile(path: string): Promise<ArrayBuffer | null> {
-        try {
-            const res = await fetch("/api/file/getFile", { method: "POST", body: JSON.stringify({ path }) });
-            return res.ok ? res.arrayBuffer() : null;
-        } catch { return null; }
-    }
-
-    private async siYuanPutFile(path: string, content: ArrayBuffer): Promise<boolean> {
-        try {
-            const fd = new FormData();
-            fd.append("path", path);
-            fd.append("file", new Blob([content]));
-            const res = await fetch("/api/file/putFile", { method: "POST", body: fd });
-            const json = await res.json();
-            return json.code === 0;
-        } catch { return false; }
-    }
-
-    private async siYuanRefreshFiletree(): Promise<boolean> {
-        try {
-            const res = await fetch("/api/filetree/refreshFiletree", { method: "POST", body: "{}" });
-            const json = await res.json();
-            return json.code === 0;
-        } catch { return false; }
-    }
-
-    private async siYuanRemoveFile(path: string): Promise<boolean> {
-        try {
-            const res = await fetch("/api/file/removeFile", { method: "POST", body: JSON.stringify({ path }) });
-            const json = await res.json();
-            return json.code === 0;
-        } catch { return false; }
-    }
-
-    private async siYuanListNotebooks(): Promise<NotebookManifestEntry[]> {
-        try {
-            const res = await fetch("/api/notebook/lsNotebooks", { method: "POST", body: "{}" });
-            const json = await res.json();
-            if (json.code !== 0 || !json.data?.notebooks) return [];
-            return json.data.notebooks.map((nb: any) => ({ id: nb.id, name: nb.name || "" }));
-        } catch { return []; }
-    }
-
-    private async siYuanOpenNotebook(notebookId: string): Promise<boolean> {
-        try {
-            const res = await fetch("/api/notebook/openNotebook", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ notebook: notebookId }),
-            });
-            const json = await res.json();
-            return json.code === 0;
-        } catch { return false; }
-    }
-
-    private async siYuanGetNotebookConf(notebookId: string): Promise<any> {
-        try {
-            const res = await fetch("/api/notebook/getNotebookConf", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ notebook: notebookId }),
-            });
-            const json = await res.json();
-            return json.code === 0 ? json.data : null;
-        } catch { return null; }
-    }
-
-    private async siYuanSetNotebookConf(notebookId: string, conf: any): Promise<boolean> {
-        try {
-            const res = await fetch("/api/notebook/setNotebookConf", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ notebook: notebookId, conf }),
-            });
-            const json = await res.json();
-            return json.code === 0;
-        } catch { return false; }
-    }
-
-    private async collectNotebookManifests(): Promise<NotebookManifestEntry[]> {
-        const notebooks = await this.siYuanListNotebooks();
-        const entries: NotebookManifestEntry[] = [];
-        for (const nb of notebooks) {
-            const conf = await this.siYuanGetNotebookConf(nb.id);
-            const name = conf?.conf?.name || conf?.name || nb.name;
-            if (name) entries.push({ id: nb.id, name });
-        }
-        return entries;
-    }
-
-    private async generateNotebookManifests(): Promise<{ githubPath: string; content: ArrayBuffer }[]> {
-        const notebooks = await this.collectNotebookManifests();
-        return notebooks.map(nb => {
-            const json = JSON.stringify({ id: nb.id, name: nb.name }, null, 2);
-            const content = new TextEncoder().encode(json).buffer;
-            return { githubPath: `${SYNC_ROOT}/${nb.id}/${NOTEBOOK_MANIFEST_FILE}`, content };
-        });
-    }
-
-    private async processNotebookManifests(remoteItems: GitHubTreeItem[]): Promise<number> {
-        const manifestItems = remoteItems.filter(i =>
-            i.type === "blob" &&
-            i.path.startsWith(`${SYNC_ROOT}/`) &&
-            i.path.endsWith(`/${NOTEBOOK_MANIFEST_FILE}`)
-        );
-        if (manifestItems.length === 0) return 0;
-
-        let processed = 0;
-        for (let i = 0; i < manifestItems.length; i++) {
-            const item = manifestItems[i];
-            const notebookId = item.path.split("/")[1];
-            if (!notebookId) continue;
-
-            this.updateProgress(
-                90 + Math.round((i / manifestItems.length) * 10),
-                `Carnet : ${i + 1}/${manifestItems.length}`,
-                notebookId
-            );
-
-            const content = await this.ghDownloadFile(item.path);
-            if (!content) continue;
-
-            try {
-                const manifest: NotebookManifestEntry = JSON.parse(new TextDecoder().decode(content));
-                if (!manifest.name) continue;
-
-                await this.siYuanOpenNotebook(notebookId);
-                const confData = await this.siYuanGetNotebookConf(notebookId);
-                if (confData?.conf) {
-                    confData.conf.name = manifest.name;
-                    await this.siYuanSetNotebookConf(notebookId, confData.conf);
-                }
-                processed++;
-                await sleep(50);
-            } catch { continue; }
-        }
-        return processed;
-    }
-
-    private async collectDir(siBase: string, ghBase: string): Promise<FileToSync[]> {
-        const entries = await this.siYuanReadDir(siBase);
-        const files: FileToSync[] = [];
-        for (const e of entries) {
-            const sp = siBase === "/" ? `/${e.name}` : `${siBase}/${e.name}`;
-            const gp = ghBase ? `${ghBase}/${e.name}` : e.name;
-            if (SKIP_ROOT_DIRS.includes(e.name)) continue;
-            if (SKIP_PATH_FRAGMENTS.some(f => sp.includes(f))) continue;
-            if (e.isDir) files.push(...await this.collectDir(sp, gp));
-            else files.push({ siYuanPath: sp, githubPath: gp });
-        }
-        return files;
-    }
-
-    private async collectInstalledPlugins(): Promise<PluginManifest> {
-        const entries = await this.siYuanReadDir(`${SYNC_ROOT}/plugins`);
-        const plugins: PluginManifestEntry[] = [];
-        for (const e of entries) {
-            if (!e.isDir || e.name === PLUGIN_SELF_NAME) continue;
-            try {
-                const raw = await this.siYuanGetFile(`${SYNC_ROOT}/plugins/${e.name}/plugin.json`);
-                if (!raw) continue;
-                const text = new TextDecoder().decode(raw);
-                const json = JSON.parse(text);
-                if (json.name && json.version) {
-                    plugins.push({ name: json.name, version: json.version });
-                }
-            } catch { continue; }
-        }
-        return { plugins };
-    }
-
-    private async generatePluginManifest(): Promise<{ githubPath: string; content: ArrayBuffer }> {
-        const manifest = await this.collectInstalledPlugins();
-        const json = JSON.stringify(manifest, null, 2);
-        const content = new TextEncoder().encode(json).buffer;
-        return { githubPath: PLUGIN_MANIFEST_PATH, content };
-    }
-
-    private async installMissingPlugins(remoteManifest: PluginManifest): Promise<number> {
-        const local = await this.collectInstalledPlugins();
-        const localMap = new Map(local.plugins.map(p => [p.name, p.version]));
-        const toInstall = remoteManifest.plugins.filter(p =>
-            p.name !== PLUGIN_SELF_NAME && !localMap.has(p.name)
-        );
-        if (toInstall.length === 0) return 0;
-
-        let installed = 0;
-        for (let i = 0; i < toInstall.length; i++) {
-            const p = toInstall[i];
-            this.updateProgress(
-                90 + Math.round((i / toInstall.length) * 10),
-                `Installation plugin : ${i + 1}/${toInstall.length}`,
-                p.name
-            );
-            const ok = await this.installSinglePlugin(p.name);
-            if (ok) installed++;
-            await sleep(200);
-        }
-        return installed;
-    }
-
-    private async installSinglePlugin(pluginName: string): Promise<boolean> {
-        try {
-            const listRes = await fetch("/api/bazaar/getBazaarPlugin", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ frontend: "all", keyword: pluginName }),
-            });
-            const listJson = await listRes.json();
-            if (listJson.code !== 0 || !listJson.data?.packages) return false;
-
-            const pkg = listJson.data.packages.find((p: any) => p.name === pluginName);
-            if (!pkg) return false;
-
-            const installRes = await fetch("/api/bazaar/installBazaarPlugin", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    repoURL: pkg.repoURL,
-                    repoHash: pkg.repoHash,
-                    packageName: pkg.name,
-                    frontend: "all",
-                }),
-            });
-            const installJson = await installRes.json();
-            return installJson.code === 0;
-        } catch { return false; }
-    }
-
-    private async collectInstalledWidgets(): Promise<PluginManifest> {
-        const entries = await this.siYuanReadDir(`${SYNC_ROOT}/widgets`);
-        const plugins: PluginManifestEntry[] = [];
-        for (const e of entries) {
-            if (!e.isDir) continue;
-            try {
-                const raw = await this.siYuanGetFile(`${SYNC_ROOT}/widgets/${e.name}/widget.json`);
-                if (!raw) continue;
-                const text = new TextDecoder().decode(raw);
-                const json = JSON.parse(text);
-                if (json.name && json.version) {
-                    plugins.push({ name: json.name, version: json.version });
-                }
-            } catch { continue; }
-        }
-        return { plugins };
-    }
-
-    private async generateWidgetManifest(): Promise<{ githubPath: string; content: ArrayBuffer }> {
-        const manifest = await this.collectInstalledWidgets();
-        const json = JSON.stringify(manifest, null, 2);
-        const content = new TextEncoder().encode(json).buffer;
-        return { githubPath: WIDGET_MANIFEST_PATH, content };
-    }
-
-    private async installMissingWidgets(remoteManifest: PluginManifest): Promise<number> {
-        const local = await this.collectInstalledWidgets();
-        const localMap = new Map(local.plugins.map(p => [p.name, p.version]));
-        const toInstall = remoteManifest.plugins.filter(p => !localMap.has(p.name));
-        if (toInstall.length === 0) return 0;
-
-        let installed = 0;
-        for (let i = 0; i < toInstall.length; i++) {
-            const p = toInstall[i];
-            this.updateProgress(
-                90 + Math.round((i / toInstall.length) * 10),
-                `Installation widget : ${i + 1}/${toInstall.length}`,
-                p.name
-            );
-            const ok = await this.installSingleWidget(p.name);
-            if (ok) installed++;
-            await sleep(200);
-        }
-        return installed;
-    }
-
-    private async installSingleWidget(widgetName: string): Promise<boolean> {
-        try {
-            const listRes = await fetch("/api/bazaar/getBazaarWidget", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ keyword: widgetName }),
-            });
-            const listJson = await listRes.json();
-            if (listJson.code !== 0 || !listJson.data?.packages) return false;
-
-            const pkg = listJson.data.packages.find((p: any) => p.name === widgetName);
-            if (!pkg) return false;
-
-            const installRes = await fetch("/api/bazaar/installBazaarWidget", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    repoURL: pkg.repoURL,
-                    repoHash: pkg.repoHash,
-                    packageName: pkg.name,
-                }),
-            });
-            const installJson = await installRes.json();
-            return installJson.code === 0;
-        } catch { return false; }
-    }
-
-    // ── GitHub APIs ──────────────────────────────────────────────────────────
-
-    private async gh(path: string, method = "GET", body?: object) {
-        return fetch(`${GITHUB_API}${path}`, {
-            method,
-            headers: { Authorization: `Bearer ${this.config.token}`, "Content-Type": "application/json", Accept: "application/vnd.github+json" },
-            body: body ? JSON.stringify(body) : undefined
-        });
-    }
-
-    /** Récupère TOUT l'arbre distant de manière efficace */
-    private async getRemoteTree(treeSha: string): Promise<GitHubTreeItem[]> {
-        const res = await this.gh(`/repos/${this.config.username}/${this.config.repo}/git/trees/${treeSha}?recursive=1`);
-        const data = await res.json();
-        return (data.tree || []) as GitHubTreeItem[];
-    }
-
-    // ── SMART DELTA SYNC ─────────────────────────────────────────────────────
-
-    private async loadSyncedState(): Promise<SyncedState | null> {
+    private async loadSyncedState(): Promise<{ commitSha: string; files: Record<string, string> } | null> {
         try {
             const data = await this.loadData(SYNCED_STATE_KEY);
             return data || null;
@@ -739,16 +218,7 @@ export default class GitHubSyncPlugin extends Plugin {
         await this.saveData(SYNCED_STATE_KEY, { commitSha, files });
     }
 
-    private async ghDownloadFile(path: string, ref?: string): Promise<ArrayBuffer | null> {
-        try {
-            const url = `/repos/${this.config.username}/${this.config.repo}/contents/${encodePath(path)}` + (ref ? `?ref=${ref}` : "");
-            const res = await this.gh(url);
-            if (!res.ok) return null;
-            const data = await res.json();
-            if (!data.content) return null;
-            return base64ToArrayBuffer(data.content);
-        } catch { return null; }
-    }
+    // ── Smart Delta Sync ─────────────────────────────────────────────────────
 
     private async mergeBeforePush(
         localFiles: FileToSync[],
@@ -764,7 +234,7 @@ export default class GitHubSyncPlugin extends Plugin {
         let skippedLarge = 0;
 
         for (const f of localFiles) {
-            const content = await this.siYuanGetFile(f.siYuanPath);
+            const content = await siYuanGetFile(f.siYuanPath);
             if (!content) { processed++; continue; }
             if (content.byteLength > MAX_FILE_BYTES) { processed++; skippedLarge++; continue; }
 
@@ -805,54 +275,7 @@ export default class GitHubSyncPlugin extends Plugin {
         return plan;
     }
 
-    private showDiffDialog(plan: MergePlan): Promise<boolean> {
-        return new Promise(resolve => {
-            const lines: string[] = [];
-            if (plan.toUpload.length > 0) {
-                lines.push(`<div style="margin:6px 0;font-weight:bold;color:var(--b3-theme-primary);">🆕 ${plan.toUpload.length} fichier(s) à envoyer</div>`);
-                for (const u of plan.toUpload.slice(0, 20)) {
-                    lines.push(`<div style="padding:2px 8px;font-size:12px;font-family:monospace;">+ ${u.githubPath}</div>`);
-                }
-                if (plan.toUpload.length > 20) lines.push(`<div style="padding:2px 8px;font-size:11px;opacity:.6;">… et ${plan.toUpload.length - 20} autre(s)</div>`);
-            }
-            if (plan.toDelete.length > 0) {
-                lines.push(`<div style="margin:6px 0;font-weight:bold;color:#f44336;">🗑️ ${plan.toDelete.length} fichier(s) à supprimer</div>`);
-                for (const d of plan.toDelete.slice(0, 20)) {
-                    lines.push(`<div style="padding:2px 8px;font-size:12px;font-family:monospace;">- ${d.githubPath}</div>`);
-                }
-                if (plan.toDelete.length > 20) lines.push(`<div style="padding:2px 8px;font-size:11px;opacity:.6;">… et ${plan.toDelete.length - 20} autre(s)</div>`);
-            }
-            if (plan.toReuse.length > 0) {
-                lines.push(`<div style="margin:6px 0;font-weight:bold;color:#4caf50;">✅ ${plan.toReuse.length} fichier(s) inchangé(s)</div>`);
-            }
-            if (plan.conflicted.length > 0) {
-                lines.push(`<div style="margin:6px 0;font-weight:bold;color:#ff9800;">⚠️ ${plan.conflicted.length} conflit(s) — modifié des 2 côtés, ignoré</div>`);
-                for (const c of plan.conflicted.slice(0, 10)) {
-                    lines.push(`<div style="padding:2px 8px;font-size:12px;font-family:monospace;">⚠ ${c.githubPath}</div>`);
-                }
-                if (plan.conflicted.length > 10) lines.push(`<div style="padding:2px 8px;font-size:11px;opacity:.6;">… et ${plan.conflicted.length - 10} autre(s)</div>`);
-            }
-            if (plan.skippedLarge > 0) {
-                lines.push(`<div style="margin:6px 0;font-weight:bold;color:#9e9e9e;">📦 ${plan.skippedLarge} fichier(s) ignoré(s) (>25 Mo)</div>`);
-            }
-            const dialog = new Dialog({
-                title: "📋 Résumé avant envoi",
-                content: `
-                    <div class="b3-dialog__content" style="padding:16px;max-height:360px;overflow-y:auto;">
-                        ${lines.join("") || "<div style='opacity:.6;'>Aucun changement détecté</div>"}
-                    </div>
-                    <div class="b3-dialog__action" style="padding:8px 16px;border-top:1px solid var(--b3-border-color);">
-                        <button id="diff-confirm" class="b3-button b3-button--info">✅ Envoyer</button>
-                        <button id="diff-cancel" class="b3-button b3-button--outline" style="margin-left:8px;">❌ Annuler</button>
-                    </div>
-                `,
-                width: window.innerWidth < 600 ? `${window.innerWidth - 32}px` : "520px",
-                destroyCallback: () => resolve(false),
-            });
-            dialog.element.querySelector("#diff-confirm")?.addEventListener("click", () => { dialog.destroy(); resolve(true); });
-            dialog.element.querySelector("#diff-cancel")?.addEventListener("click", () => { dialog.destroy(); resolve(false); });
-        });
-    }
+    // ── Push ─────────────────────────────────────────────────────────────────
 
     private async pushToGitHub() {
         if (!this.config.token) return showMessage("⚠️ Configurez le plugin.");
@@ -861,25 +284,25 @@ export default class GitHubSyncPlugin extends Plugin {
         this.showProgressUI("push");
 
         try {
-            const localFiles = await this.collectDir("/", SYNC_ROOT);
-            const pluginManifest = await this.generatePluginManifest();
+            const api = new GitHubAPI(this.config.token, this.config.username, this.config.repo);
+            const localFiles = await collectDir("/", SYNC_ROOT);
+            const pluginManifest = await generatePluginManifest();
             const manifestSha = await calculateGitSha(pluginManifest.content);
-            const widgetManifest = await this.generateWidgetManifest();
+            const widgetManifest = await generateWidgetManifest();
             const widgetManifestSha = await calculateGitSha(widgetManifest.content);
-            const notebookManifests = await this.generateNotebookManifests();
-            const notebookManifestMap = new Map(notebookManifests.map(nm => [nm.githubPath, nm]));
-            const repoInfo = await (await this.gh(`/repos/${this.config.username}/${this.config.repo}`)).json();
+            const notebookManifests = await generateNotebookManifests();
+            const repoInfo = await (await api.getRepoInfo()).json();
             const branch = repoInfo.default_branch || "main";
 
             let lastCommitSha: string | null = null;
             let remoteMap = new Map<string, string>();
 
-            const refRes = await this.gh(`/repos/${this.config.username}/${this.config.repo}/git/refs/heads/${branch}`);
+            const refRes = await api.getRef(branch);
             if (refRes.ok) {
                 const refData = await refRes.json();
                 lastCommitSha = refData.object.sha;
-                const lastCommit = await (await this.gh(`/repos/${this.config.username}/${this.config.repo}/git/commits/${lastCommitSha}`)).json();
-                const remoteTree = await this.getRemoteTree(lastCommit.tree.sha);
+                const lastCommit = await (await api.getCommit(lastCommitSha)).json();
+                const remoteTree = await api.getRemoteTree(lastCommit.tree.sha);
                 remoteTree.forEach(item => { if (item.type === "blob") remoteMap.set(item.path, item.sha); });
             }
 
@@ -900,8 +323,8 @@ export default class GitHubSyncPlugin extends Plugin {
             }
 
             for (const pull of plan.toPull) {
-                const remoteContent = await this.ghDownloadFile(pull.githubPath, lastCommitSha || undefined);
-                if (remoteContent) await this.siYuanPutFile(pull.siYuanPath, remoteContent);
+                const remoteContent = await api.downloadFile(pull.githubPath, lastCommitSha || undefined);
+                if (remoteContent) await siYuanPutFile(pull.siYuanPath, remoteContent);
                 plan.toReuse.push({ githubPath: pull.githubPath, sha: remoteMap.get(pull.githubPath) });
             }
 
@@ -919,12 +342,12 @@ export default class GitHubSyncPlugin extends Plugin {
             }
 
             if (!lastCommitSha) {
-                if (this.config.showDiff) { const ok = await this.showDiffDialog(plan); if (!ok) { if (this.currentUI) this.currentUI.dialog.destroy(); this.activeTask = null; return; } }
-                await this.pushInitialCommit(plan, branch, pluginManifest, widgetManifest, notebookManifests);
+                if (this.config.showDiff) { const ok = await showDiffDialog(plan); if (!ok) { if (this.currentUI) this.currentUI.destroy(); this.activeTask = null; return; } }
+                await this.pushInitialCommit(plan, branch, pluginManifest, widgetManifest, notebookManifests, api);
                 return;
             }
 
-            if (this.config.showDiff) { const ok = await this.showDiffDialog(plan); if (!ok) { if (this.currentUI) this.currentUI.dialog.destroy(); this.activeTask = null; return; } }
+            if (this.config.showDiff) { const ok = await showDiffDialog(plan); if (!ok) { if (this.currentUI) this.currentUI.destroy(); this.activeTask = null; return; } }
 
             const treeItems: any[] = [];
             for (const r of plan.toReuse) treeItems.push({ path: r.githubPath, mode: "100644", type: "blob", sha: r.sha });
@@ -933,16 +356,14 @@ export default class GitHubSyncPlugin extends Plugin {
             for (let i = 0; i < plan.toUpload.length; i++) {
                 const u = plan.toUpload[i];
                 this.updateProgress(10 + Math.round((i / plan.toUpload.length) * 75), `Upload : ${i + 1}/${plan.toUpload.length}`, u.githubPath);
-                const blobRes = await this.gh(`/repos/${this.config.username}/${this.config.repo}/git/blobs`, "POST", {
-                    content: arrayBufferToBase64(u.content), encoding: "base64"
-                });
+                const blobRes = await api.createBlob(arrayBufferToBase64(u.content));
                 if (!blobRes.ok) {
                     console.error(`[GitHub Sync] Blob échoué pour ${u.githubPath}:`, await blobRes.text());
                     continue;
                 }
                 const blobData = await blobRes.json();
                 treeItems.push({ path: u.githubPath, mode: "100644", type: "blob", sha: blobData.sha });
-                uploadedSummaries.push({ path: u.githubPath, content: this.extractTextFromSyFile(u.content) });
+                uploadedSummaries.push({ path: u.githubPath, content: extractTextFromSyFile(u.content) });
             }
 
             for (const d of plan.toDelete) {
@@ -951,18 +372,14 @@ export default class GitHubSyncPlugin extends Plugin {
             }
 
             this.updateProgress(85, "Upload manifeste plugins...", PLUGIN_MANIFEST_PATH);
-            const manifestBlobRes = await this.gh(`/repos/${this.config.username}/${this.config.repo}/git/blobs`, "POST", {
-                content: arrayBufferToBase64(pluginManifest.content), encoding: "base64"
-            });
+            const manifestBlobRes = await api.createBlob(arrayBufferToBase64(pluginManifest.content));
             if (manifestBlobRes.ok) {
                 const manifestBlobData = await manifestBlobRes.json();
                 treeItems.push({ path: PLUGIN_MANIFEST_PATH, mode: "100644", type: "blob", sha: manifestBlobData.sha });
             }
 
             this.updateProgress(87, "Upload manifeste widgets...", WIDGET_MANIFEST_PATH);
-            const widgetManifestBlobRes = await this.gh(`/repos/${this.config.username}/${this.config.repo}/git/blobs`, "POST", {
-                content: arrayBufferToBase64(widgetManifest.content), encoding: "base64"
-            });
+            const widgetManifestBlobRes = await api.createBlob(arrayBufferToBase64(widgetManifest.content));
             if (widgetManifestBlobRes.ok) {
                 const widgetManifestBlobData = await widgetManifestBlobRes.json();
                 treeItems.push({ path: WIDGET_MANIFEST_PATH, mode: "100644", type: "blob", sha: widgetManifestBlobData.sha });
@@ -971,9 +388,7 @@ export default class GitHubSyncPlugin extends Plugin {
             let notebooksUploaded = 0;
             for (const nm of notebookManifests) {
                 this.updateProgress(88, `Upload manifeste carnet (${++notebooksUploaded}/${notebookManifests.length})...`, nm.githubPath);
-                const nmBlobRes = await this.gh(`/repos/${this.config.username}/${this.config.repo}/git/blobs`, "POST", {
-                    content: arrayBufferToBase64(nm.content), encoding: "base64"
-                });
+                const nmBlobRes = await api.createBlob(arrayBufferToBase64(nm.content));
                 if (nmBlobRes.ok) {
                     const nmBlobData = await nmBlobRes.json();
                     treeItems.push({ path: nm.githubPath, mode: "100644", type: "blob", sha: nmBlobData.sha });
@@ -981,22 +396,17 @@ export default class GitHubSyncPlugin extends Plugin {
             }
 
             this.updateProgress(90, "Finalisation...", "Création de l'arbre...");
-            const baseTreeRes = await this.gh(`/repos/${this.config.username}/${this.config.repo}/git/commits/${lastCommitSha}`);
+            const baseTreeRes = await api.getCommit(lastCommitSha);
             const baseTreeData = await baseTreeRes.json();
-            const treeRes = await this.gh(`/repos/${this.config.username}/${this.config.repo}/git/trees`, "POST", {
-                base_tree: baseTreeData.tree.sha, tree: treeItems
-            });
+            const treeRes = await api.createTree(baseTreeData.tree.sha, treeItems);
             const treeData = await treeRes.json();
 
-            const aiMsg = await this.generateCommitMessage(uploadedSummaries);
+            const aiMsg = await generateCommitMessage(this.config.groqKey, uploadedSummaries);
             const commitMsg = aiMsg || `Sync : +${plan.toUpload.length}, ~${plan.toReuse.length}, -${plan.toDelete.length}, ↕${plan.toPull.length} pull(s)`;
-            const commitRes = await this.gh(`/repos/${this.config.username}/${this.config.repo}/git/commits`, "POST", {
-                message: commitMsg,
-                tree: treeData.sha, parents: [lastCommitSha]
-            });
+            const commitRes = await api.createCommit(commitMsg, treeData.sha, [lastCommitSha]);
             const commitData = await commitRes.json();
 
-            await this.gh(`/repos/${this.config.username}/${this.config.repo}/git/refs/heads/${branch}`, "PATCH", { sha: commitData.sha });
+            await api.updateRef(branch, commitData.sha);
 
             const newFilesState: Record<string, string> = {};
             for (const r of plan.toReuse) newFilesState[r.githubPath] = r.sha;
@@ -1023,18 +433,18 @@ export default class GitHubSyncPlugin extends Plugin {
         } finally { this.activeTask = null; }
     }
 
-    private async pushInitialCommit(plan: MergePlan, branch: string, pluginManifest: { githubPath: string; content: ArrayBuffer }, widgetManifest: { githubPath: string; content: ArrayBuffer }, notebookManifests: { githubPath: string; content: ArrayBuffer }[] = []) {
+    private async pushInitialCommit(
+        plan: MergePlan, branch: string,
+        pluginManifest: ManifestFile, widgetManifest: ManifestFile,
+        notebookManifests: ManifestFile[], api: GitHubAPI,
+    ) {
         let uploaded = 0;
         const total = plan.toUpload.length;
         let errors = 0;
 
         for (const u of plan.toUpload) {
             this.updateProgress(10 + Math.round((uploaded / Math.max(total, 1)) * 80), `Upload : ${uploaded + 1}/${total}`, u.githubPath);
-            const res = await this.gh(`/repos/${this.config.username}/${this.config.repo}/contents/${encodePath(u.githubPath)}`, "PUT", {
-                message: `Sync init : ${u.githubPath}`,
-                content: arrayBufferToBase64(u.content),
-                branch,
-            });
+            const res = await api.putContent(u.githubPath, `Sync init : ${u.githubPath}`, arrayBufferToBase64(u.content), branch);
             if (!res.ok) {
                 const err = await res.json().catch(() => ({ message: "unknown" }));
                 console.error(`[GitHub Sync] Erreur upload ${u.githubPath}:`, err.message);
@@ -1045,29 +455,17 @@ export default class GitHubSyncPlugin extends Plugin {
         }
 
         this.updateProgress(90, "Upload manifeste plugins...", pluginManifest.githubPath);
-        const manifestRes = await this.gh(`/repos/${this.config.username}/${this.config.repo}/contents/${encodePath(pluginManifest.githubPath)}`, "PUT", {
-            message: "Sync init : plugin manifest",
-            content: arrayBufferToBase64(pluginManifest.content),
-            branch,
-        });
+        const manifestRes = await api.putContent(pluginManifest.githubPath, "Sync init : plugin manifest", arrayBufferToBase64(pluginManifest.content), branch);
         if (!manifestRes.ok) errors++;
 
         this.updateProgress(93, "Upload manifeste widgets...", widgetManifest.githubPath);
-        const widgetManifestRes = await this.gh(`/repos/${this.config.username}/${this.config.repo}/contents/${encodePath(widgetManifest.githubPath)}`, "PUT", {
-            message: "Sync init : widget manifest",
-            content: arrayBufferToBase64(widgetManifest.content),
-            branch,
-        });
+        const widgetManifestRes = await api.putContent(widgetManifest.githubPath, "Sync init : widget manifest", arrayBufferToBase64(widgetManifest.content), branch);
         if (!widgetManifestRes.ok) errors++;
 
         let notebooksUploadedInit = 0;
         for (const nm of notebookManifests) {
             this.updateProgress(95 + Math.round((notebooksUploadedInit / notebookManifests.length) * 4), `Upload manifeste carnet ${notebooksUploadedInit + 1}/${notebookManifests.length}...`, nm.githubPath);
-            const nmRes = await this.gh(`/repos/${this.config.username}/${this.config.repo}/contents/${encodePath(nm.githubPath)}`, "PUT", {
-                message: `Sync init : ${nm.githubPath}`,
-                content: arrayBufferToBase64(nm.content),
-                branch,
-            });
+            const nmRes = await api.putContent(nm.githubPath, `Sync init : ${nm.githubPath}`, arrayBufferToBase64(nm.content), branch);
             if (!nmRes.ok) {
                 const errText = await nmRes.json().catch(() => ({ message: "unknown" }));
                 console.error(`[GitHub Sync] Erreur upload ${nm.githubPath}:`, errText.message);
@@ -1076,11 +474,11 @@ export default class GitHubSyncPlugin extends Plugin {
             notebooksUploadedInit++;
         }
 
-        const newRefRes = await this.gh(`/repos/${this.config.username}/${this.config.repo}/git/refs/heads/${branch}`);
+        const newRefRes = await api.getRef(branch);
         if (newRefRes.ok) {
             const newRef = await newRefRes.json();
-            const newCommit = await (await this.gh(`/repos/${this.config.username}/${this.config.repo}/git/commits/${newRef.object.sha}`)).json();
-            const newTree = await this.getRemoteTree(newCommit.tree.sha);
+            const newCommit = await (await api.getCommit(newRef.object.sha)).json();
+            const newTree = await api.getRemoteTree(newCommit.tree.sha);
             const newFilesState: Record<string, string> = {};
             newTree.forEach(item => { if (item.type === "blob") newFilesState[item.path] = item.sha; });
             await this.saveSyncedState(newRef.object.sha, newFilesState);
@@ -1092,6 +490,8 @@ export default class GitHubSyncPlugin extends Plugin {
         if (this.currentUI) this.currentUI.finish(msg);
     }
 
+    // ── Pull ─────────────────────────────────────────────────────────────────
+
     private async pullFromGitHub() {
         if (!this.config.token) return showMessage("⚠️ Configurez le plugin.");
         this.activeTask = "pull";
@@ -1099,10 +499,11 @@ export default class GitHubSyncPlugin extends Plugin {
         this.showProgressUI("pull");
 
         try {
-            const repoInfo = await (await this.gh(`/repos/${this.config.username}/${this.config.repo}`)).json();
+            const api = new GitHubAPI(this.config.token, this.config.username, this.config.repo);
+            const repoInfo = await (await api.getRepoInfo()).json();
             const branch = repoInfo.default_branch || "main";
 
-            const refRes = await this.gh(`/repos/${this.config.username}/${this.config.repo}/git/refs/heads/${branch}`);
+            const refRes = await api.getRef(branch);
             if (!refRes.ok) {
                 const msg = "Le dépôt est vide. Faites un Push d'abord.";
                 this.lastProgress = { ...this.lastProgress, finished: true, message: msg };
@@ -1110,8 +511,8 @@ export default class GitHubSyncPlugin extends Plugin {
                 return;
             }
             const refData = await refRes.json();
-            const lastCommit = await (await this.gh(`/repos/${this.config.username}/${this.config.repo}/git/commits/${refData.object.sha}`)).json();
-            const remoteItems = (await this.getRemoteTree(lastCommit.tree.sha)).filter(i => {
+            const lastCommit = await (await api.getCommit(refData.object.sha)).json();
+            const remoteItems = (await api.getRemoteTree(lastCommit.tree.sha)).filter(i => {
                 if (i.type !== "blob") return false;
                 const p = i.path;
                 if (p.startsWith("data/")) {
@@ -1134,15 +535,15 @@ export default class GitHubSyncPlugin extends Plugin {
 
                 if (siPath.endsWith(".siyuan.sy")) { skipped++; continue; }
 
-                const localContent = await this.siYuanGetFile(siPath);
+                const localContent = await siYuanGetFile(siPath);
                 const localSha = localContent ? await calculateGitSha(localContent) : "";
 
                 if (localSha === item.sha) {
                     skipped++;
                 } else {
-                    const content = await this.ghDownloadFile(item.path);
+                    const content = await api.downloadFile(item.path);
                     if (content && content.byteLength > 0) {
-                        const ok = await this.siYuanPutFile(siPath, content);
+                        const ok = await siYuanPutFile(siPath, content);
                         if (ok) { updated++; }
                         else { errors++; console.error(`[GitHub Sync] Écriture échouée: ${siPath}`); }
                     } else {
@@ -1153,46 +554,48 @@ export default class GitHubSyncPlugin extends Plugin {
                 await sleep(30);
             }
 
-            await this.siYuanRefreshFiletree();
+            await siYuanRefreshFiletree();
+
+            const onProgress = (pct: number, status: string, details: string) => this.updateProgress(pct, status, details);
 
             let pluginsInstalled = 0;
             const manifestItem = remoteItems.find(i => i.path === PLUGIN_MANIFEST_PATH);
             if (manifestItem) {
-                const manifestContent = await this.ghDownloadFile(manifestItem.path);
+                const manifestContent = await api.downloadFile(manifestItem.path);
                 if (manifestContent) {
                     try {
-                        const manifest: PluginManifest = JSON.parse(new TextDecoder().decode(manifestContent));
-                        pluginsInstalled = await this.installMissingPlugins(manifest);
-                    } catch { /* manifeste invalide, on ignore */ }
+                        const manifest = JSON.parse(new TextDecoder().decode(manifestContent));
+                        pluginsInstalled = await installMissingPlugins(manifest, onProgress);
+                    } catch { /* ignore */ }
                 }
             }
 
             let widgetsInstalled = 0;
             const widgetManifestItem = remoteItems.find(i => i.path === WIDGET_MANIFEST_PATH);
             if (widgetManifestItem) {
-                const widgetManifestContent = await this.ghDownloadFile(widgetManifestItem.path);
+                const widgetManifestContent = await api.downloadFile(widgetManifestItem.path);
                 if (widgetManifestContent) {
                     try {
-                        const wManifest: PluginManifest = JSON.parse(new TextDecoder().decode(widgetManifestContent));
-                        widgetsInstalled = await this.installMissingWidgets(wManifest);
-                    } catch { /* manifeste invalide, on ignore */ }
+                        const wManifest = JSON.parse(new TextDecoder().decode(widgetManifestContent));
+                        widgetsInstalled = await installMissingWidgets(wManifest, onProgress);
+                    } catch { /* ignore */ }
                 }
             }
 
             let notebooksProcessed = 0;
             try {
-                notebooksProcessed = await this.processNotebookManifests(remoteItems);
-                await this.siYuanRefreshFiletree();
-            } catch { /* erreur ignorée */ }
+                notebooksProcessed = await processNotebookManifests(remoteItems, api, onProgress);
+                await siYuanRefreshFiletree();
+            } catch { /* ignore */ }
 
-            const localFilesForDelete = await this.collectDir("/", SYNC_ROOT);
+            const localFilesForDelete = await collectDir("/", SYNC_ROOT);
             const remotePathSet = new Set(remoteItems.map(i => i.path));
             let deleted = 0;
             for (const lf of localFilesForDelete) {
                 if (LOCKED_EXTENSIONS.some(ext => lf.githubPath.toLowerCase().endsWith(ext)) ||
                     lf.githubPath.endsWith(".siyuan.sy")) continue;
                 if (!remotePathSet.has(lf.githubPath) && !remotePathSet.has(lf.githubPath.replace(/^\//, ""))) {
-                    const ok = await this.siYuanRemoveFile(lf.siYuanPath);
+                    const ok = await siYuanRemoveFile(lf.siYuanPath);
                     if (ok) deleted++;
                 }
             }
@@ -1220,68 +623,23 @@ export default class GitHubSyncPlugin extends Plugin {
 
     private async handleHistoryClick() {
         if (!this.config.token) return showMessage("⚠️ Configurez le plugin.");
-        new HistoryDialog(this);
+        new HistoryDialog(
+            () => this.getHistory(),
+            (sha: string, msg: string) => this.restoreCommit(sha, msg),
+        );
     }
 
     async getHistory(): Promise<any[]> {
-        const res = await this.gh(`/repos/${this.config.username}/${this.config.repo}/commits?per_page=30`);
-        if (!res.ok) throw new Error("Impossible de récupérer l'historique");
-        return res.json();
-    }
-
-    private extractTextFromSyFile(content: ArrayBuffer): string {
-        try {
-            const text = new TextDecoder().decode(content);
-            const json = JSON.parse(text);
-            const texts: string[] = [];
-            const walk = (obj: unknown, depth = 0) => {
-                if (!obj || typeof obj !== "object" || depth > 8) return;
-                if (Array.isArray(obj)) { obj.forEach(v => walk(v, depth + 1)); return; }
-                const o = obj as Record<string, unknown>;
-                if (o.content && typeof o.content === "string" && o.content.length > 5) texts.push(o.content);
-                if (o.markdown && typeof o.markdown === "string" && o.markdown.length > 5) texts.push(o.markdown);
-                if (o.text && typeof o.text === "string" && o.text.length > 5) texts.push(o.text);
-                if (o.name && typeof o.name === "string" && o.name.length > 5) texts.push(o.name);
-                if (o.title && typeof o.title === "string" && o.title.length > 5) texts.push(o.title);
-                for (const val of Object.values(o)) {
-                    if (typeof val === "object") walk(val, depth + 1);
-                }
-            };
-            walk(json);
-            return texts.join("\n").replace(/\s+/g, " ").trim().slice(0, 800);
-        } catch {
-            const text = new TextDecoder().decode(content);
-            return text.replace(/[^\w\s\u00C0-\u00FF-]/g, " ").replace(/\s+/g, " ").trim().slice(0, 600);
-        }
-    }
-
-    private async generateCommitMessage(summaries: { path: string; content: string }[]): Promise<string> {
-        if (!this.config.groqKey) return "";
-        try {
-            let fileDesc = summaries.map(s => {
-                const title = s.content.split("\n")[0].replace(/#{1,6}\s*/, "").trim();
-                const extra = s.content.length > 80 ? s.content.slice(0, 200) : "";
-                return `- ${s.path}: ${title} — ${extra}`;
-            }).join("\n");
-            if (fileDesc.length > 6000) fileDesc = fileDesc.slice(0, 6000) + "\n...";
-            const prompt = `Tu es un expert Git. Génère un message de commit très précis en français (max 72 caractères) décrivant les changements réels ci-dessous. Sois spécifique sur le contenu modifié, pas générique.\n\nFichiers modifiés :\n${fileDesc}`;
-            const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-                method: "POST",
-                headers: { Authorization: `Bearer ${this.config.groqKey}`, "Content-Type": "application/json" },
-                body: JSON.stringify({ model: "llama-3.3-70b-versatile", messages: [{ role: "user", content: prompt }], max_tokens: 120 })
-            });
-            if (!res.ok) return "";
-            const data = await res.json();
-            const msg = data.choices?.[0]?.message?.content?.trim();
-            return msg ? msg.replace(/["']/g, "").split("\n")[0].slice(0, 72) : "";
-        } catch { return ""; }
+        const api = new GitHubAPI(this.config.token, this.config.username, this.config.repo);
+        return api.getCommits();
     }
 
     async restoreCommit(sha: string, message: string) {
-        const commitRes = await this.gh(`/repos/${this.config.username}/${this.config.repo}/git/commits/${sha}`);
+        const api = new GitHubAPI(this.config.token, this.config.username, this.config.repo);
+        const commitRes = await api.getCommit(sha);
         if (!commitRes.ok) throw new Error("Impossible de récupérer le commit");
         const commitData = await commitRes.json();
-        const treeItems = await this.getRemoteTree(commitData.tree.sha);
+        const treeItems = await api.getRemoteTree(commitData.tree.sha);
         const blobs = treeItems.filter(i =>
             i.type === "blob" && i.path.startsWith(SYNC_ROOT) &&
             !i.path.startsWith("data/plugins/siyuan-github-sync/")
@@ -1294,20 +652,20 @@ export default class GitHubSyncPlugin extends Plugin {
                 siPath.includes("/temp/") || SKIP_PATH_FRAGMENTS.some(f => siPath.includes(f)) ||
                 siPath.endsWith(".siyuan.sy")) continue;
 
-            const content = await this.ghDownloadFile(item.path, sha);
+            const content = await api.downloadFile(item.path, sha);
             if (content && content.byteLength > 0) {
-                await this.siYuanPutFile(siPath, content);
+                await siYuanPutFile(siPath, content);
                 updated++;
             }
             await sleep(30);
         }
 
-        await this.siYuanRefreshFiletree();
+        await siYuanRefreshFiletree();
 
         try {
-            const notebooksProcessed = await this.processNotebookManifests(treeItems);
-            if (notebooksProcessed > 0) await this.siYuanRefreshFiletree();
-        } catch { /* erreur ignorée */ }
+            const notebooksProcessed = await processNotebookManifests(treeItems, api);
+            if (notebooksProcessed > 0) await siYuanRefreshFiletree();
+        } catch { /* ignore */ }
 
         const newFilesState: Record<string, string> = {};
         treeItems.forEach(item => { if (item.type === "blob") newFilesState[item.path] = item.sha; });
@@ -1315,86 +673,5 @@ export default class GitHubSyncPlugin extends Plugin {
 
         showMessage(`✅ Restauré : ${updated} fichiers (commit: ${sha.slice(0, 7)} — ${message})`);
         setTimeout(() => window.location.reload(), 1500);
-    }
-}
-
-// ─── History Dialog ─────────────────────────────────────────────────────────
-
-class HistoryDialog {
-    private plugin: GitHubSyncPlugin;
-    private dialog: Dialog;
-    private listEl: HTMLElement;
-
-    constructor(plugin: GitHubSyncPlugin) {
-        this.plugin = plugin;
-        this.dialog = new Dialog({
-            title: "📜 Historique des commits",
-            content: `
-                <div class="b3-dialog__content" style="padding: 16px; max-height: 480px; overflow-y: auto;">
-                    <div id="history-list" style="min-height: 80px;">
-                        <div style="text-align:center;padding:32px;color:var(--b3-theme-on-background);">Chargement...</div>
-                    </div>
-                </div>
-                <div class="b3-dialog__action" style="padding: 8px 16px; border-top: 1px solid var(--b3-border-color);">
-                    <button id="history-refresh" class="b3-button b3-button--outline">🔄 Rafraîchir</button>
-                    <button id="history-close" class="b3-button b3-button--outline" style="margin-left: 8px;">Fermer</button>
-                </div>
-            `,
-            width: window.innerWidth < 600 ? `${window.innerWidth - 32}px` : "600px",
-        });
-        this.listEl = this.dialog.element.querySelector("#history-list");
-        this.dialog.element.querySelector("#history-refresh").addEventListener("click", () => this.load());
-        this.dialog.element.querySelector("#history-close").addEventListener("click", () => this.dialog.destroy());
-        this.load();
-    }
-
-    private async load() {
-        this.listEl.innerHTML = `<div style="text-align:center;padding:32px;color:var(--b3-theme-on-background);">Chargement...</div>`;
-        try {
-            const commits = await this.plugin.getHistory();
-            if (commits.length === 0) {
-                this.listEl.innerHTML = `<div style="text-align:center;padding:32px;color:var(--b3-theme-on-background);">Aucun commit trouvé.</div>`;
-                return;
-            }
-            let html = "";
-            for (const c of commits) {
-                const sha = c.sha.slice(0, 7);
-                const date = new Date(c.commit.author.date).toLocaleString("fr-FR");
-                const author = c.commit.author.name;
-                const msg = c.commit.message.split("\n")[0];
-                html += `
-                    <div style="display:flex;align-items:center;padding:10px 8px;border-bottom:1px solid var(--b3-border-color);gap:8px;">
-                        <span style="font-family:monospace;font-size:11px;color:var(--b3-theme-primary);min-width:64px;">${sha}</span>
-                        <div style="flex:1;min-width:0;">
-                            <div style="font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${this.escapeHtml(msg)}</div>
-                            <div style="font-size:11px;opacity:0.6;">${date} par ${this.escapeHtml(author)}</div>
-                        </div>
-                        <button class="b3-button b3-button--outline restore-btn" data-sha="${c.sha}" data-msg="${this.escapeHtml(msg)}" style="flex-shrink:0;">Restaurer</button>
-                    </div>
-                `;
-            }
-            this.listEl.innerHTML = html;
-            this.listEl.querySelectorAll(".restore-btn").forEach(btn => {
-                btn.addEventListener("click", async (e) => {
-                    const el = e.currentTarget as HTMLElement;
-                    el.disabled = true;
-                    el.textContent = "⏳...";
-                    try {
-                        await this.plugin.restoreCommit(el.dataset.sha, el.dataset.msg);
-                        this.dialog.destroy();
-                    } catch (err) {
-                        showMessage(`❌ Restauration échouée : ${err.message}`, 6000, "error");
-                        el.disabled = false;
-                        el.textContent = "Restaurer";
-                    }
-                });
-            });
-        } catch (err) {
-            this.listEl.innerHTML = `<div style="text-align:center;padding:32px;color:var(--b3-theme-error);">❌ ${this.escapeHtml(err.message)}</div>`;
-        }
-    }
-
-    private escapeHtml(s: string): string {
-        return s.replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c] || c);
     }
 }
