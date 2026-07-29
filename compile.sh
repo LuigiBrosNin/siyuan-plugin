@@ -4,21 +4,33 @@ set -euo pipefail
 PLUGIN_NAME="siyuan-github-sync"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# ─── Lire la version depuis plugin.json ────────────────────────────────────────
 VERSION=$(grep -o '"version": *"[^"]*"' "$SCRIPT_DIR/plugin.json" | head -1 | sed 's/.*"\([0-9][0-9.]*\)".*/\1/')
 ZIP_NAME="${PLUGIN_NAME}-${VERSION}.zip"
 
-# ─── Mode ──────────────────────────────────────────────────────────────────────
-# Usage: ./compile.sh          → test (déploiement dans SiYuan)
-#        ./compile.sh publish  → publie (package.zip + rien d'autre)
-MODE="${1:-test}"
-
-# ─── Couleurs ──────────────────────────────────────────────────────────────────
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
 NC='\033[0m'
+
+MODE="${1:-}"
+
+if [ -z "$MODE" ]; then
+    echo ""
+    echo -e "${CYAN}┌──────────────────────────────────────────────────┐${NC}"
+    echo -e "${CYAN}│        SiYuan GitHub Sync — Menu                │${NC}"
+    echo -e "${CYAN}└──────────────────────────────────────────────────┘${NC}"
+    echo ""
+    echo "  1) Test       — Compiler + déployer dans SiYuan"
+    echo "  2) Publier    — Compiler + créer package.zip"
+    echo ""
+    read -rp "  Choix [1/2] : " choix
+    echo ""
+    case "$choix" in
+        2) MODE="publish" ;;
+        *) MODE="test" ;;
+    esac
+fi
 
 echo ""
 echo -e "${CYAN}┌──────────────────────────────────────────────────┐${NC}"
@@ -30,7 +42,6 @@ fi
 echo -e "${CYAN}└──────────────────────────────────────────────────┘${NC}"
 echo ""
 
-# ─── Étape 1 : Dépendances ────────────────────────────────────────────────────
 echo -e "[1/3]  Vérification des dépendances npm..."
 if [ ! -d "$SCRIPT_DIR/node_modules" ]; then
     echo "       Installation des modules..."
@@ -39,19 +50,16 @@ fi
 echo -e "       ${GREEN}OK${NC} - Dépendances prêtes."
 echo ""
 
-# ─── Étape 2 : Compilation ────────────────────────────────────────────────────
 echo -e "[2/3]  Compilation..."
 echo ""
 cd "$SCRIPT_DIR" && npm run build
 echo -e "       ${GREEN}OK${NC} - Compilation réussie."
 echo ""
 
-# ─── Étape 3 : Résultat ───────────────────────────────────────────────────────
 if [ "$MODE" = "publish" ]; then
-    # Mode publication : créer le zip avec le nom de la version
     cd "$SCRIPT_DIR"
-    rm -f "dist/package.zip" "dist/${ZIP_NAME}" "dist/siyuan-github-sync.zip"
-    cd dist && zip -r "${ZIP_NAME}" . -x "siyuan-github-sync.zip" && cd ..
+    rm -f "dist/${ZIP_NAME}" "dist/siyuan-github-sync.zip"
+    cp dist/package.zip "dist/${ZIP_NAME}"
     echo -e "       ${GREEN}OK${NC} - ${ZIP_NAME} créé dans dist/"
     echo ""
     echo -e "${CYAN}┌──────────────────────────────────────────────────┐${NC}"
@@ -63,7 +71,6 @@ if [ "$MODE" = "publish" ]; then
     echo -e "  Fichier : ${YELLOW}$SCRIPT_DIR/dist/${ZIP_NAME}${NC}"
     echo ""
 else
-    # Mode test : déploiement dans SiYuan
     if [ -n "${SIYUAN_WORKSPACE:-}" ]; then
         SIYUAN_DATA="$SIYUAN_WORKSPACE/data"
     elif [ -f "$HOME/.config/siyuan/workspace.json" ]; then

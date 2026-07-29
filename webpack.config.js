@@ -1,53 +1,42 @@
 const path = require("path");
 const MiniCssExtractPlugin = require("mini-css-extract-plugin");
 const CopyPlugin = require("copy-webpack-plugin");
-const ZipPlugin = require("zip-webpack-plugin");
 
 module.exports = (env, argv) => {
     const production = argv.mode === "production";
 
+    const outputDir = production ? "dist" : ".";
+
     const plugins = [
         new MiniCssExtractPlugin({
-            filename: production ? "dist/index.css" : "index.css",
+            filename: "index.css",
         }),
         new CopyPlugin({
             patterns: [
-                // Always copy the manifest
-                { from: "plugin.json", to: production ? "./dist/" : "./" },
-                // Copy i18n if present
+                { from: "plugin.json", to: "." },
                 {
                     from: "src/i18n",
-                    to: production ? "./dist/i18n/" : "./i18n/",
+                    to: "i18n/",
                     noErrorOnMissing: true,
                 },
-                // Copy icons if present
                 {
                     from: "icon.png",
-                    to: production ? "./dist/" : "./",
+                    to: ".",
                     noErrorOnMissing: true,
                 },
                 {
                     from: "preview.png",
-                    to: production ? "./dist/" : "./",
+                    to: ".",
                     noErrorOnMissing: true,
                 },
                 {
                     from: "README.md",
-                    to: production ? "./dist/" : "./",
+                    to: ".",
                     noErrorOnMissing: true,
                 },
             ],
         }),
     ];
-
-    if (production) {
-        plugins.push(
-            new ZipPlugin({
-                filename: "siyuan-github-sync.zip",
-                path: path.resolve(__dirname, "dist"),
-            })
-        );
-    }
 
     return {
         mode: production ? "production" : "development",
@@ -55,8 +44,8 @@ module.exports = (env, argv) => {
             index: "./src/index.ts",
         },
         output: {
-            filename: production ? "dist/index.js" : "index.js",
-            path: path.resolve(__dirname),
+            filename: "index.js",
+            path: path.resolve(__dirname, outputDir),
             libraryTarget: "commonjs2",
             libraryExport: "default",
         },
