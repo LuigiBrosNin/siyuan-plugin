@@ -4,7 +4,7 @@ export const SYNC_ROOT      = "data";
 export const MAX_FILE_BYTES = 25_000_000;
 
 export const SKIP_ROOT_DIRS = [
-    "plugins", "conf", ".siyuan", "storage", "emojis",
+    "plugins", "conf", ".siyuan", "!storage/av", "storage/*", "emojis",
     "public", "templates", "widgets", "siyuan-github-sync",
     "history",
 ];
