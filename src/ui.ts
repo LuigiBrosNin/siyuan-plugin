@@ -1,6 +1,7 @@
 import { Dialog } from "siyuan";
 import { MergePlan } from "./types";
-import { sanitizeForDisplay } from "./utils";
+//import { sanitizeForDisplay } from "./utils";
+import { t } from "./i18n";
 
 export class SyncProgressUI {
     private dialog: Dialog;
@@ -14,12 +15,12 @@ export class SyncProgressUI {
             title,
             content: `
                 <div class="b3-dialog__content" style="padding: 24px;">
-                    <div id="sync-status" style="font-weight: bold; margin-bottom: 12px; color: var(--b3-theme-on-background);">Initialisation...</div>
+                    <div id="sync-status" style="font-weight: bold; margin-bottom: 12px; color: var(--b3-theme-on-background);">${t('status.initializing')}</div>
                     <div style="height: 12px; background: var(--b3-border-color); border-radius: 6px; overflow: hidden; margin-bottom: 12px;">
                         <div id="sync-bar" style="width: 0%; height: 100%; background: var(--b3-theme-primary); transition: width 0.3s ease;"></div>
                     </div>
                     <div id="sync-details" style="font-size: 11px; opacity: 0.7; line-height: 1.4; word-break: break-all; min-height: 32px; font-family: monospace;">
-                        Vérification des fichiers...
+                        ${t('progress.analysis')}
                     </div>
                 </div>
             `,
@@ -43,14 +44,14 @@ export class SyncProgressUI {
 
     finish(message: string, showButton = true) {
         if (this.isDestroyed) return;
-        this.update(100, "✅ Terminé", message);
+        this.update(100, t('ui.done'), message);
         if (!showButton) return;
         const content = this.dialog.element.querySelector(".b3-dialog__content");
         if (content && !content.querySelector(".b3-dialog__action")) {
             const footer = document.createElement("div");
             footer.className = "b3-dialog__action";
             footer.style.marginTop = "16px";
-            footer.innerHTML = `<button class="b3-button b3-button--outline">Fermer</button>`;
+            footer.innerHTML = `<button class="b3-button b3-button--outline">Close</button>`;
             (footer.querySelector(".b3-button--outline") as HTMLElement).onclick = () => this.dialog.destroy();
             content.appendChild(footer);
         }
@@ -62,7 +63,7 @@ export class SyncProgressUI {
 
     error(message: string) {
         if (this.isDestroyed) return;
-        this.update(100, "❌ Erreur", message);
+        this.update(100, t('ui.error'), message);
         if (this.barElement) this.barElement.style.background = "var(--b3-theme-error)";
     }
 }
@@ -71,41 +72,53 @@ export function showDiffDialog(plan: MergePlan): Promise<boolean> {
     return new Promise(resolve => {
         const lines: string[] = [];
         if (plan.toUpload.length > 0) {
-            lines.push(`<div style="margin:6px 0;font-weight:bold;color:var(--b3-theme-primary);">🆕 ${plan.toUpload.length} fichier(s) à envoyer</div>`);
+            const locale = (window as any).__github_sync_locale || 'fr';
+            const filesLabel = locale === 'en' ? 'file(s) to send' : 'fichier(s) à envoyer';
+            const otherLabel = locale === 'en' ? 'other(s)' : 'autre(s)';
+            lines.push(`<div style="margin:6px 0;font-weight:bold;color:var(--b3-theme-primary);">🆕 ${plan.toUpload.length} ${filesLabel}</div>`);
             for (const u of plan.toUpload.slice(0, 20)) {
                 lines.push(`<div style="padding:2px 8px;font-size:12px;font-family:monospace;">+ ${u.githubPath}</div>`);
             }
-            if (plan.toUpload.length > 20) lines.push(`<div style="padding:2px 8px;font-size:11px;opacity:.6;">… et ${plan.toUpload.length - 20} autre(s)</div>`);
+            if (plan.toUpload.length > 20) lines.push(`<div style="padding:2px 8px;font-size:11px;opacity:.6;">… et ${plan.toUpload.length - 20} ${otherLabel}</div>`);
         }
         if (plan.toDelete.length > 0) {
-            lines.push(`<div style="margin:6px 0;font-weight:bold;color:#f44336;">🗑️ ${plan.toDelete.length} fichier(s) à supprimer</div>`);
-            for (const d of plan.toDelete.slice(0, 20)) {
-                lines.push(`<div style="padding:2px 8px;font-size:12px;font-family:monospace;">- ${d.githubPath}</div>`);
-            }
-            if (plan.toDelete.length > 20) lines.push(`<div style="padding:2px 8px;font-size:11px;opacity:.6;">… et ${plan.toDelete.length - 20} autre(s)</div>`);
-        }
+                    const locale = (window as any).__github_sync_locale || 'fr';
+                    const filesLabel = locale === 'en' ? 'file(s) to remove' : 'fichier(s) à supprimer';
+                    const otherLabel = locale === 'en' ? 'other(s)' : 'autre(s)';
+                    lines.push(`<div style="margin:6px 0;font-weight:bold;color:#f44336;">🗑️ ${plan.toDelete.length} ${filesLabel}</div>`);
+                    for (const d of plan.toDelete.slice(0, 20)) {
+                        lines.push(`<div style="padding:2px 8px;font-size:12px;font-family:monospace;">- ${d.githubPath}</div>`);
+                    }
+                    if (plan.toDelete.length > 20) lines.push(`<div style="padding:2px 8px;font-size:11px;opacity:.6;">… et ${plan.toDelete.length - 20} ${otherLabel}</div>`);
+                }
         if (plan.toReuse.length > 0) {
-            lines.push(`<div style="margin:6px 0;font-weight:bold;color:#4caf50;">✅ ${plan.toReuse.length} fichier(s) inchangé(s)</div>`);
+            const locale = (window as any).__github_sync_locale || 'fr';
+            const unchangedLabel = locale === 'en' ? 'file(s) unchanged' : 'fichier(s) inchangé(s)';
+            lines.push(`<div style="margin:6px 0;font-weight:bold;color:#4caf50;">✅ ${plan.toReuse.length} ${unchangedLabel}</div>`);
         }
         if (plan.conflicted.length > 0) {
-            lines.push(`<div style="margin:6px 0;font-weight:bold;color:#ff9800;">⚠️ ${plan.conflicted.length} conflit(s) — modifié des 2 côtés, ignoré</div>`);
+            const locale = (window as any).__github_sync_locale || 'fr';
+            const conflictText = locale === 'en' ? `⚠️ ${plan.conflicted.length} conflict(s) — modified on both sides, ignored` : `⚠️ ${plan.conflicted.length} conflit(s) — modifié des 2 côtés, ignoré`;
+            lines.push(`<div style="margin:6px 0;font-weight:bold;color:#ff9800;">${conflictText}</div>`);
             for (const c of plan.conflicted.slice(0, 10)) {
                 lines.push(`<div style="padding:2px 8px;font-size:12px;font-family:monospace;">⚠ ${c.githubPath}</div>`);
             }
             if (plan.conflicted.length > 10) lines.push(`<div style="padding:2px 8px;font-size:11px;opacity:.6;">… et ${plan.conflicted.length - 10} autre(s)</div>`);
         }
         if (plan.skippedLarge > 0) {
-            lines.push(`<div style="margin:6px 0;font-weight:bold;color:#9e9e9e;">📦 ${plan.skippedLarge} fichier(s) ignoré(s) (>25 Mo)</div>`);
+            const locale = (window as any).__github_sync_locale || 'fr';
+            const skippedLabel = locale === 'en' ? 'file(s) skipped' : 'fichier(s) ignoré(s)';
+            lines.push(`<div style="margin:6px 0;font-weight:bold;color:#9e9e9e;">📦 ${plan.skippedLarge} ${skippedLabel} (>25 Mo)</div>`);
         }
         const dialog = new Dialog({
-            title: "📋 Résumé avant envoi",
+            title: t('diff.title'),
             content: `
                 <div class="b3-dialog__content" style="padding:16px;max-height:360px;overflow-y:auto;">
-                    ${lines.join("") || "<div style='opacity:.6;'>Aucun changement détecté</div>"}
+                    ${lines.join("") || `<div style='opacity:.6;'>${t('diff.no_changes')}</div>`}
                 </div>
                 <div class="b3-dialog__action" style="padding:8px 16px;border-top:1px solid var(--b3-border-color);">
-                    <button id="diff-confirm" class="b3-button b3-button--info">✅ Envoyer</button>
-                    <button id="diff-cancel" class="b3-button b3-button--outline" style="margin-left:8px;">❌ Annuler</button>
+                    <button id="diff-confirm" class="b3-button b3-button--info">${t('diff.send')}</button>
+                    <button id="diff-cancel" class="b3-button b3-button--outline" style="margin-left:8px;">${t('diff.cancel')}</button>
                 </div>
             `,
             width: window.innerWidth < 600 ? `${window.innerWidth - 32}px` : "520px",

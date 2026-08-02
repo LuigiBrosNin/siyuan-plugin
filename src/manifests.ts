@@ -5,6 +5,7 @@ import {
 import { siYuanReadDir, siYuanGetFile, siYuanListNotebooks, siYuanGetNotebookConf, siYuanOpenNotebook, siYuanSetNotebookConf, installSinglePlugin, installSingleWidget, installSingleTheme, getCurrentAppearance, setActiveTheme } from "./siyuan-api";
 import { GitHubAPI } from "./github-api";
 import { sleep } from "./utils";
+import { t, getLocale } from "./i18n";
 
 export async function collectInstalledPlugins(): Promise<PluginManifest> {
     const entries = await siYuanReadDir(`${SYNC_ROOT}/plugins`);
@@ -47,7 +48,7 @@ export async function installMissingPlugins(
         const p = toInstall[i];
         if (onProgress) onProgress(
             90 + Math.round((i / toInstall.length) * 10),
-            `Installation plugin : ${i + 1}/${toInstall.length}`,
+            `${t('install.plugin_prefix')} ${i + 1}/${toInstall.length}`,
             p.name
         );
         const ok = await installSinglePlugin(p.name);
@@ -96,7 +97,7 @@ export async function installMissingWidgets(
         const p = toInstall[i];
         if (onProgress) onProgress(
             90 + Math.round((i / toInstall.length) * 10),
-            `Installation widget : ${i + 1}/${toInstall.length}`,
+            `${t('install.widget_prefix')} ${i + 1}/${toInstall.length}`,
             p.name
         );
         const ok = await installSingleWidget(p.name);
@@ -157,7 +158,7 @@ export async function installMissingThemes(
         const p = toInstall[i];
         if (onProgress) onProgress(
             90 + Math.round((i / toInstall.length) * 10),
-            `Installation thème : ${i + 1}/${toInstall.length}`,
+            `${t('install.theme_prefix')} ${i + 1}/${toInstall.length}`,
             p.name
         );
         const ok = await installSingleTheme(p.name, currentMode);
@@ -215,7 +216,7 @@ export async function processNotebookManifests(
 
         if (onProgress) onProgress(
             90 + Math.round((i / manifestItems.length) * 10),
-            `Carnet : ${i + 1}/${manifestItems.length}`,
+            `${t('notebook.prefix')} ${i + 1}/${manifestItems.length}`,
             notebookId
         );
 

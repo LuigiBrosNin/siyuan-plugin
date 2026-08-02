@@ -25,22 +25,25 @@ import {
 } from "./manifests";
 import { SyncProgressUI, showDiffDialog } from "./ui";
 import { HistoryDialog } from "./history";
+import { t, setLocale, availableLocales, getLocale } from "./i18n";
 
 export default class GitHubSyncPlugin extends Plugin {
     private config: GitHubConfig = { ...DEFAULT_CONFIG };
     private activeTask: "push" | "pull" | null = null;
     private currentUI: SyncProgressUI | null = null;
-    private lastProgress = { percent: 0, status: "Initialisation...", details: "", finished: false, error: false, message: "" };
+    private lastProgress = { percent: 0, status: t('status.initializing'), details: "", finished: false, error: false, message: "" };
     private statusBarEl: HTMLElement | null = null;
 
     async onload() {
         this.addIcons(`<symbol id="iconGitHubUpload" viewBox="0 0 24 24"><path fill="currentColor" d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 13v-4H8l4-4 4 4h-3v4h-2z"/></symbol><symbol id="iconGitHubDownload" viewBox="0 0 24 24"><path fill="currentColor" d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 7v4h3l-4 4-4-4h3V9h2z"/></symbol><symbol id="iconGitHistory" viewBox="0 0 24 24"><path fill="currentColor" d="M13 3a9 9 0 0 0-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42A8.954 8.954 0 0 0 13 21a9 9 0 0 0 0-18zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z"/></symbol>`);
         const saved = await this.loadData(STORAGE_KEY);
         if (saved) this.config = { ...DEFAULT_CONFIG, ...saved };
+        // apply saved locale
+        try { setLocale(this.config.language ?? "fr"); (window as any).__github_sync_locale = getLocale(); } catch {}
         this.registerSettings();
-        this.addTopBar({ icon: "iconGitHubUpload", title: "Smart Push (Incrémental)", position: "right", callback: () => this.handlePushClick() });
-        this.addTopBar({ icon: "iconGitHubDownload", title: "Smart Pull (Incrémental)", position: "right", callback: () => this.handlePullClick() });
-        this.addTopBar({ icon: "iconGitHistory", title: "📜 Historique des commits", position: "right", callback: () => this.handleHistoryClick() });
+        this.addTopBar({ icon: "iconGitHubUpload", title: t('top.push_title'), position: "right", callback: () => this.handlePushClick() });
+        this.addTopBar({ icon: "iconGitHubDownload", title: t('top.pull_title'), position: "right", callback: () => this.handlePullClick() });
+        this.addTopBar({ icon: "iconGitHistory", title: t('top.history_title'), position: "right", callback: () => this.handleHistoryClick() });
         setTimeout(() => this.attachToStatusBar(), 1000);
     }
 
@@ -89,50 +92,50 @@ export default class GitHubSyncPlugin extends Plugin {
     }
 
     private registerSettings() {
-        const uIn = this.mkInput("Utilisateur", this.config.username);
-        const rIn = this.mkInput("Dépôt", this.config.repo);
-        const tIn = this.mkInput("Token GitHub", this.config.token, "password");
-        const gIn = this.mkInput("Clé API Groq (optionnel)", this.config.groqKey, "password");
+        const uIn = this.mkInput(t('setting.github_user'), this.config.username);
+        const rIn = this.mkInput(t('setting.github_repo'), this.config.repo);
+        const tIn = this.mkInput(t('setting.github_token'), this.config.token, "password");
+        const gIn = this.mkInput(t('setting.groq_key'), this.config.groqKey, "password");
         const dIn = document.createElement("input");
         dIn.type = "checkbox";
         dIn.checked = this.config.showDiff;
         dIn.style.cssText = "width:16px;height:16px;cursor:pointer;margin:0;";
         const tBtn = document.createElement("button");
         tBtn.className = "b3-button b3-button--outline fn__block";
-        tBtn.textContent = "🔍 Tester GitHub";
+        tBtn.textContent = t('button.test_github');
         tBtn.onclick = async () => {
             tBtn.disabled = true;
             const api = new GitHubAPI(tIn.value.trim(), uIn.value, rIn.value);
-            if (await api.testConnection()) showMessage("✅ OK"); else showMessage("❌ Erreur", 6000, "error");
+            if (await api.testConnection()) showMessage(t('status.ok')); else showMessage(t('status.error'), 6000, "error");
             tBtn.disabled = false;
         };
 
         const eBtn = document.createElement("button");
         eBtn.className = "b3-button b3-button--outline fn__block";
-        eBtn.textContent = "📤 Exporter";
+        eBtn.textContent = t('button.export');
         eBtn.onclick = () => {
             const hasToken = !!tIn.value.trim();
             const hasGroq = !!gIn.value.trim();
             const warnParts: string[] = [];
-            if (hasToken) warnParts.push("le token GitHub");
-            if (hasGroq) warnParts.push("la clé API Groq");
+            if (hasToken) warnParts.push("the GitHub token");
+            if (hasGroq) warnParts.push("the Groq API key");
             if (warnParts.length > 0) {
-                const ok = confirm(`⚠️ Attention : le fichier exporté contiendra ${warnParts.join(" et ")} en clair.\nNe partage jamais ce fichier.`);
+                const ok = confirm(`${t('msg.export_warning_prefix')} ${warnParts.join(" and ")} in cleartext.\nDo not share this file.`);
                 if (!ok) return;
             }
-            const cfg = { username: uIn.value.trim(), repo: rIn.value.trim(), token: tIn.value.trim(), groqKey: gIn.value.trim(), showDiff: dIn.checked };
+            const cfg = { username: uIn.value.trim(), repo: rIn.value.trim(), token: tIn.value.trim(), groqKey: gIn.value.trim(), showDiff: dIn.checked, language: (this.config && this.config.language) || 'fr' };
             const blob = new Blob([JSON.stringify(cfg, null, 2)], { type: "application/json" });
             const a = document.createElement("a");
             a.href = URL.createObjectURL(blob);
             a.download = "siyuan-github-sync-config.json";
             a.click();
             URL.revokeObjectURL(a.href);
-            showMessage("✅ Config exportée");
+            showMessage(t('msg.config_exported'));
         };
 
         const iBtn = document.createElement("button");
         iBtn.className = "b3-button b3-button--outline fn__block";
-        iBtn.textContent = "📥 Importer";
+        iBtn.textContent = t('button.import');
         iBtn.onclick = () => {
             const fi = document.createElement("input");
             fi.type = "file";
@@ -143,11 +146,12 @@ export default class GitHubSyncPlugin extends Plugin {
                 try {
                     const text = await file.text();
                     const data = JSON.parse(text);
-                    if (!data.username || !data.repo || !data.token) { showMessage("❌ Fichier invalide", 6000, "error"); return; }
+                    if (!data.username || !data.repo || !data.token) { showMessage("❌ Invalid file", 6000, "error"); return; }
                     uIn.value = data.username; rIn.value = data.repo; tIn.value = data.token;
                     gIn.value = data.groqKey || ""; dIn.checked = !!data.showDiff;
-                    showMessage("✅ Config chargée. Appuie sur Enregistrer.");
-                } catch { showMessage("❌ Fichier invalide", 6000, "error"); }
+                    if (data.language) { try { setLocale(data.language); } catch {} }
+                    showMessage(t('msg.config_loaded'));
+                } catch { showMessage("❌ Invalid file", 6000, "error"); }
             };
             fi.click();
         };
@@ -157,17 +161,30 @@ export default class GitHubSyncPlugin extends Plugin {
         btnRow.appendChild(tBtn); btnRow.appendChild(eBtn); btnRow.appendChild(iBtn);
         this.setting = new Setting({
             confirmCallback: async () => {
-                this.config = { username: uIn.value.trim(), repo: rIn.value.trim(), token: tIn.value.trim(), groqKey: gIn.value.trim(), showDiff: dIn.checked };
+                this.config = { username: uIn.value.trim(), repo: rIn.value.trim(), token: tIn.value.trim(), groqKey: gIn.value.trim(), showDiff: dIn.checked, language: this.config.language || 'fr' };
                 await this.saveData(STORAGE_KEY, this.config);
-                showMessage("✅ Enregistré");
+                showMessage(t('msg.saved'));
             }
         });
-        this.setting.addItem({ title: "GitHub Utilisateur", createActionElement: () => uIn });
-        this.setting.addItem({ title: "GitHub Dépôt", createActionElement: () => rIn });
-        this.setting.addItem({ title: "GitHub Token PAT", createActionElement: () => tIn });
-        this.setting.addItem({ title: "Clé API Groq (optionnel)", createActionElement: () => gIn });
-        this.setting.addItem({ title: "Afficher le diff avant push", createActionElement: () => dIn });
-        this.setting.addItem({ title: "Actions", createActionElement: () => btnRow });
+        // language selector
+        const langSelect = document.createElement("select");
+        langSelect.className = "b3-select fn__block";
+        const _langLabels: Record<string,string> = { fr: 'Français', en: 'English' };
+        for (const loc of availableLocales()) {
+            const opt = document.createElement("option");
+            opt.value = loc; opt.textContent = _langLabels[loc] || loc;
+            langSelect.appendChild(opt);
+        }
+        langSelect.value = this.config.language || getLocale();
+        langSelect.onchange = () => { this.config.language = langSelect.value; try { setLocale(langSelect.value); (window as any).__github_sync_locale = getLocale(); } catch {} };
+
+        this.setting.addItem({ title: t('setting.github_user'), createActionElement: () => uIn });
+        this.setting.addItem({ title: t('setting.github_repo'), createActionElement: () => rIn });
+        this.setting.addItem({ title: t('setting.github_token'), createActionElement: () => tIn });
+        this.setting.addItem({ title: t('setting.groq_key'), createActionElement: () => gIn });
+        this.setting.addItem({ title: t('setting.show_diff'), createActionElement: () => dIn });
+        this.setting.addItem({ title: t('setting.language'), createActionElement: () => langSelect });
+        this.setting.addItem({ title: t('setting.actions'), createActionElement: () => btnRow });
     }
 
     private mkInput(ph: string, val: string, type = "text") {
@@ -193,7 +210,7 @@ export default class GitHubSyncPlugin extends Plugin {
 
     private showProgressUI(type: "push" | "pull") {
         if (this.currentUI && !this.currentUI.isDestroyed) return;
-        this.currentUI = new SyncProgressUI(type === "push" ? "⏫ Smart Push (Incrémental)" : "⏬ Smart Pull (Incrémental)", () => { this.currentUI = null; });
+        this.currentUI = new SyncProgressUI(type === "push" ? t('top.push_title') : t('top.pull_title'), () => { this.currentUI = null; });
         if (this.lastProgress.finished) {
             if (this.lastProgress.error) this.currentUI.error(this.lastProgress.message);
             else this.currentUI.finish(this.lastProgress.message);
@@ -259,7 +276,7 @@ export default class GitHubSyncPlugin extends Plugin {
             processed++;
             this.updateProgress(
                 5 + Math.round((processed / localFiles.length) * 70),
-                `Analyse : ${processed}/${localFiles.length}`,
+                `${t('progress.analysis')} : ${processed}/${localFiles.length}`,
                 f.siYuanPath
             );
             if (processed % 5 === 0) await sleep(20);
@@ -280,7 +297,7 @@ export default class GitHubSyncPlugin extends Plugin {
     private async pushToGitHub() {
         if (!this.config.token) return showMessage("⚠️ Configurez le plugin.");
         this.activeTask = "push";
-        this.lastProgress = { percent: 0, status: "Analyse...", details: "Comparaison des SHAs...", finished: false, error: false, message: "" };
+        this.lastProgress = { percent: 0, status: t('progress.analysis'), details: "Comparaison des SHAs...", finished: false, error: false, message: "" };
         this.showProgressUI("push");
 
         try {
@@ -308,7 +325,7 @@ export default class GitHubSyncPlugin extends Plugin {
                 remoteTree.forEach(item => { if (item.type === "blob") remoteMap.set(item.path, item.sha); });
             }
 
-            this.updateProgress(5, "Merge...", "Comparaison local / distant / dernière sync...");
+            this.updateProgress(5, t('merge.status'), t('merge.compare'));
             const plan = await this.mergeBeforePush(localFiles, remoteMap, lastCommitSha || "");
 
             const remoteManifestSha = remoteMap.get(PLUGIN_MANIFEST_PATH);
@@ -339,8 +356,8 @@ export default class GitHubSyncPlugin extends Plugin {
                 for (const r of plan.toReuse) newFilesState[r.githubPath] = r.sha;
                 await this.saveSyncedState(lastCommitSha || "", newFilesState);
                 const msg = plan.conflicted.length
-                    ? `Aucun changement à envoyer. ⚠️ ${plan.conflicted.length} conflit(s) ignoré(s).`
-                    : "Tout est déjà à jour ! Aucun envoi nécessaire.";
+                    ? t('msg.no_changes_conflicts').replace('{n}', String(plan.conflicted.length))
+                    : t('msg.no_changes_none');
                 this.lastProgress = { ...this.lastProgress, finished: true, message: msg };
                 if (this.currentUI) this.currentUI.finish(msg);
                 return;
@@ -373,24 +390,24 @@ export default class GitHubSyncPlugin extends Plugin {
 
             for (const d of plan.toDelete) {
                 treeItems.push({ path: d.githubPath, mode: "100644", sha: null });
-                uploadedSummaries.push({ path: d.githubPath, content: "(fichier supprimé)" });
+                uploadedSummaries.push({ path: d.githubPath, content: t('msg.file_deleted') });
             }
 
-            this.updateProgress(85, "Upload manifeste plugins...", PLUGIN_MANIFEST_PATH);
+            this.updateProgress(85, t('progress.upload_plugin_manifest'), PLUGIN_MANIFEST_PATH);
             const manifestBlobRes = await api.createBlob(arrayBufferToBase64(pluginManifest.content));
             if (manifestBlobRes.ok) {
                 const manifestBlobData = await manifestBlobRes.json();
                 treeItems.push({ path: PLUGIN_MANIFEST_PATH, mode: "100644", type: "blob", sha: manifestBlobData.sha });
             }
 
-            this.updateProgress(87, "Upload manifeste widgets...", WIDGET_MANIFEST_PATH);
+            this.updateProgress(87, t('progress.upload_widget_manifest'), WIDGET_MANIFEST_PATH);
             const widgetManifestBlobRes = await api.createBlob(arrayBufferToBase64(widgetManifest.content));
             if (widgetManifestBlobRes.ok) {
                 const widgetManifestBlobData = await widgetManifestBlobRes.json();
                 treeItems.push({ path: WIDGET_MANIFEST_PATH, mode: "100644", type: "blob", sha: widgetManifestBlobData.sha });
             }
 
-            this.updateProgress(88, "Upload manifeste thèmes...", THEME_MANIFEST_PATH);
+            this.updateProgress(88, t('progress.upload_theme_manifest'), THEME_MANIFEST_PATH);
             const themeManifestBlobRes = await api.createBlob(arrayBufferToBase64(themeManifest.content));
             if (themeManifestBlobRes.ok) {
                 const themeManifestBlobData = await themeManifestBlobRes.json();
@@ -407,7 +424,7 @@ export default class GitHubSyncPlugin extends Plugin {
                 }
             }
 
-            this.updateProgress(90, "Finalisation...", "Création de l'arbre...");
+            this.updateProgress(90, t('progress.finalizing'), t('progress.creating_tree'));
             const baseTreeRes = await api.getCommit(lastCommitSha);
             const baseTreeData = await baseTreeRes.json();
             const treeRes = await api.createTree(baseTreeData.tree.sha, treeItems);
@@ -429,13 +446,18 @@ export default class GitHubSyncPlugin extends Plugin {
             await this.saveSyncedState(commitData.sha, newFilesState);
 
             const parts: string[] = [];
-            if (plan.toUpload.length) parts.push(`${plan.toUpload.length} envoyé(s)`);
-            if (plan.toPull.length) parts.push(`${plan.toPull.length} récupéré(s)`);
-            if (plan.toDelete.length) parts.push(`${plan.toDelete.length} supprimé(s)`);
-            if (plan.toReuse.length) parts.push(`${plan.toReuse.length} inchangé(s)`);
-            let msg = `Push terminé — ${parts.join(", ")}.`;
-            if (plan.skippedLarge) msg += ` ⚠️ ${plan.skippedLarge} fichier(s) ignoré(s) (>25 Mo).`;
-            if (plan.conflicted.length) msg += ` ⚠️ ${plan.conflicted.length} conflit(s) non résolu(s) (modifié des 2 côtés).`;
+            if (plan.toUpload.length) parts.push(`${plan.toUpload.length} ${t('stat.sent')}`);
+            if (plan.toPull.length) parts.push(`${plan.toPull.length} ${t('stat.pulled')}`);
+            if (plan.toDelete.length) parts.push(`${plan.toDelete.length} ${t('stat.deleted')}`);
+            if (plan.toReuse.length) parts.push(`${plan.toReuse.length} ${t('stat.unchanged')}`);
+            let msg = `${t('msg.push_done_prefix')} ${parts.join(", ")}.`;
+            if (plan.skippedLarge) msg += ` ⚠️ ${plan.skippedLarge} ${t('msg.skipped_files')}`;
+            if (plan.conflicted.length) {
+                const conflictNote = getLocale && getLocale() === 'en'
+                    ? ` ⚠️ ${plan.conflicted.length} conflict(s) unresolved (modified on both sides).`
+                    : ` ⚠️ ${plan.conflicted.length} conflit(s) non résolu(s) (modifié des 2 côtés).`;
+                msg += conflictNote;
+            }
             this.lastProgress = { ...this.lastProgress, finished: true, message: msg };
             if (this.currentUI) this.currentUI.finish(msg);
             await this.saveSyncTimestamp();
@@ -467,15 +489,15 @@ export default class GitHubSyncPlugin extends Plugin {
             if (uploaded % 5 === 0) await sleep(100);
         }
 
-        this.updateProgress(90, "Upload manifeste plugins...", pluginManifest.githubPath);
+        this.updateProgress(90, t('progress.upload_plugin_manifest'), pluginManifest.githubPath);
         const manifestRes = await api.putContent(pluginManifest.githubPath, "Sync init : plugin manifest", arrayBufferToBase64(pluginManifest.content), branch);
         if (!manifestRes.ok) errors++;
 
-        this.updateProgress(93, "Upload manifeste widgets...", widgetManifest.githubPath);
+        this.updateProgress(93, t('progress.upload_widget_manifest'), widgetManifest.githubPath);
         const widgetManifestRes = await api.putContent(widgetManifest.githubPath, "Sync init : widget manifest", arrayBufferToBase64(widgetManifest.content), branch);
         if (!widgetManifestRes.ok) errors++;
 
-        this.updateProgress(94, "Upload manifeste thèmes...", themeManifest.githubPath);
+        this.updateProgress(94, t('progress.upload_theme_manifest'), themeManifest.githubPath);
         const themeManifestRes = await api.putContent(themeManifest.githubPath, "Sync init : theme manifest", arrayBufferToBase64(themeManifest.content), branch);
         if (!themeManifestRes.ok) errors++;
 
@@ -501,7 +523,7 @@ export default class GitHubSyncPlugin extends Plugin {
             await this.saveSyncedState(newRef.object.sha, newFilesState);
         }
 
-        let msg = `Push initial terminé — ${uploaded} fichiers envoyés.`;
+        let msg = t('msg.push_initial_done').replace('{n}', String(uploaded));
         if (errors > 0) msg += ` ⚠️ ${errors} erreur(s).`;
         this.lastProgress = { ...this.lastProgress, finished: true, message: msg };
         if (this.currentUI) this.currentUI.finish(msg);
@@ -512,7 +534,7 @@ export default class GitHubSyncPlugin extends Plugin {
     private async pullFromGitHub() {
         if (!this.config.token) return showMessage("⚠️ Configurez le plugin.");
         this.activeTask = "pull";
-        this.lastProgress = { percent: 0, status: "Analyse...", details: "Lecture du dépôt distant...", finished: false, error: false, message: "" };
+        this.lastProgress = { percent: 0, status: t('progress.analysis'), details: t('progress.reading_remote'), finished: false, error: false, message: "" };
         this.showProgressUI("pull");
 
         try {
@@ -522,7 +544,7 @@ export default class GitHubSyncPlugin extends Plugin {
 
             const refRes = await api.getRef(branch);
             if (!refRes.ok) {
-                const msg = "Le dépôt est vide. Faites un Push d'abord.";
+                const msg = t('msg.repo_empty');
                 this.lastProgress = { ...this.lastProgress, finished: true, message: msg };
                 if (this.currentUI) this.currentUI.finish(msg);
                 return;
@@ -633,12 +655,12 @@ export default class GitHubSyncPlugin extends Plugin {
             remoteItems.forEach(item => { newFilesState[item.path] = item.sha; });
             await this.saveSyncedState(refData.object.sha, newFilesState);
 
-            let msg = `Pull terminé : ${updated} fichiers mis à jour, ${skipped} déjà à jour ou protégés, ${deleted} supprimé(s).`;
-            if (pluginsInstalled > 0) msg += ` 🔌 ${pluginsInstalled} plugin(s) installé(s).`;
-            if (widgetsInstalled > 0) msg += ` 🧩 ${widgetsInstalled} widget(s) installé(s).`;
-            if (themesInstalled > 0) msg += ` 🎨 ${themesInstalled} thème(s) installé(s).`;
-            if (notebooksProcessed > 0) msg += ` 📓 ${notebooksProcessed} carnet(s) ouvert(s).`;
-            if (errors > 0) msg += ` ⚠️ ${errors} erreur(s).`;
+            let msg = t('msg.pull_done').replace('{updated}', String(updated)).replace('{skipped}', String(skipped)).replace('{deleted}', String(deleted));
+            if (pluginsInstalled > 0) msg += ` ${t('msg.plugins_installed').replace('{n}', String(pluginsInstalled))}`;
+            if (widgetsInstalled > 0) msg += ` ${t('msg.widgets_installed').replace('{n}', String(widgetsInstalled))}`;
+            if (themesInstalled > 0) msg += ` ${t('msg.themes_installed').replace('{n}', String(themesInstalled))}`;
+            if (notebooksProcessed > 0) msg += ` ${t('msg.notebooks_processed').replace('{n}', String(notebooksProcessed))}`;
+            if (errors > 0) msg += ` ${t('msg.errors').replace('{n}', String(errors))}`;
             this.lastProgress = { ...this.lastProgress, finished: true, message: msg };
             if (this.currentUI) this.currentUI.finish(msg, false);
             await this.saveSyncTimestamp();
@@ -667,7 +689,7 @@ export default class GitHubSyncPlugin extends Plugin {
     async restoreCommit(sha: string, message: string) {
         const api = new GitHubAPI(this.config.token, this.config.username, this.config.repo);
         const commitRes = await api.getCommit(sha);
-        if (!commitRes.ok) throw new Error("Impossible de récupérer le commit");
+        if (!commitRes.ok) throw new Error(t('error.cannot_fetch_commit') || "Cannot fetch commit");
         const commitData = await commitRes.json();
         const treeItems = await api.getRemoteTree(commitData.tree.sha);
         const blobs = treeItems.filter(i =>
@@ -706,7 +728,7 @@ export default class GitHubSyncPlugin extends Plugin {
         treeItems.forEach(item => { if (item.type === "blob") newFilesState[item.path] = item.sha; });
         await this.saveSyncedState(sha, newFilesState);
 
-        showMessage(`✅ Restauré : ${updated} fichiers (commit: ${sha.slice(0, 7)} — ${message})`);
+        showMessage(t('msg.restored').replace('{n}', String(updated)).replace('{sha}', sha.slice(0,7)).replace('{message}', message));
         setTimeout(() => window.location.reload(), 1500);
     }
 }

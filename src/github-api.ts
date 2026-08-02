@@ -1,5 +1,6 @@
 import { GITHUB_API, GitHubTreeItem } from "./types";
 import { encodePath, base64ToArrayBuffer } from "./utils";
+import { t } from "./i18n";
 
 export class GitHubAPI {
     constructor(
@@ -42,7 +43,7 @@ export class GitHubAPI {
 
     async getCommits(): Promise<any[]> {
         const res = await this.gh(`/repos/${this.username}/${this.repo}/commits?per_page=30`);
-        if (!res.ok) throw new Error("Impossible de récupérer l'historique");
+        if (!res.ok) throw new Error(t('msg.repo_empty'));
         return res.json();
     }
 

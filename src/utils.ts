@@ -1,3 +1,5 @@
+import { getLocale, t } from "./i18n";
+
 export function arrayBufferToBase64(buffer: ArrayBuffer): string {
     const bytes = new Uint8Array(buffer);
     let bin = "";
@@ -39,12 +41,13 @@ export function sanitizeForDisplay(s: string): string {
 export function friendlyError(err: unknown): string {
     const raw = err instanceof Error ? err.message : String(err);
     const msg = raw.toLowerCase();
-    if (msg.includes("bad credentials") || msg.includes("401") || msg.includes("token")) return "❌ Token GitHub invalide ou expiré. Va dans Paramètres → génère un nouveau token.";
-    if (msg.includes("not found") || msg.includes("404")) return "❌ Dépôt GitHub introuvable. Vérifie le nom du dépôt dans Paramètres.";
-    if (msg.includes("networkerror") || msg.includes("failed to fetch") || msg.includes("network")) return "❌ Pas de connexion internet. Vérifie ta connexion.";
-    if (msg.includes("rate limit") || msg.includes("403")) return "❌ Limite d'appels API GitHub atteinte. Réessaie dans 1 minute.";
-    if (msg.includes("aborted") || msg.includes("timeout")) return "❌ Requête annulée (timeout). Réessaie.";
-    if (msg.includes("size") || msg.includes("large")) return "❌ Fichier trop volumineux (>25 Mo). Ignoré.";
+    const locale = getLocale();
+    if (msg.includes("bad credentials") || msg.includes("401") || msg.includes("token")) return locale === 'en' ? t('error.token_invalid') : t('error.token_invalid');
+    if (msg.includes("not found") || msg.includes("404")) return t('error.repo_not_found');
+    if (msg.includes("networkerror") || msg.includes("failed to fetch") || msg.includes("network")) return t('error.no_internet');
+    if (msg.includes("rate limit") || msg.includes("403")) return t('error.rate_limit');
+    if (msg.includes("aborted") || msg.includes("timeout")) return t('error.request_aborted');
+    if (msg.includes("size") || msg.includes("large")) return t('error.file_too_large');
     return `❌ ${sanitizeForDisplay(raw)}`;
 }
 
@@ -83,7 +86,10 @@ export async function generateCommitMessage(groqKey: string, summaries: { path: 
             return `- ${s.path}: ${title} — ${extra}`;
         }).join("\n");
         if (fileDesc.length > 6000) fileDesc = fileDesc.slice(0, 6000) + "\n...";
-        const prompt = `Tu es un expert Git. Génère un message de commit très précis en français (max 72 caractères) décrivant les changements réels ci-dessous. Sois spécifique sur le contenu modifié, pas générique.\n\nFichiers modifiés :\n${fileDesc}`;
+        const locale = getLocale();
+        const prompt = locale === 'en'
+            ? `You are a Git expert. Generate a very precise commit message in English (max 72 characters) describing the actual changes below. Be specific about the modified content, not generic.\n\nChanged files:\n${fileDesc}`
+            : `Tu es un expert Git. Génère un message de commit très précis en français (max 72 caractères) décrivant les changements réels ci-dessous. Sois spécifique sur le contenu modifié, pas générique.\n\nFichiers modifiés :\n${fileDesc}`;
         const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
             method: "POST",
             headers: { Authorization: `Bearer ${groqKey}`, "Content-Type": "application/json" },

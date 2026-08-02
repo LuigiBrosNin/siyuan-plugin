@@ -1,87 +1,89 @@
 # SiYuan GitHub Sync Plugin
 
-Synchronisez vos notes SiYuan avec un dépôt GitHub privé via l'API REST GitHub. Compatible **Windows, Linux, macOS et Android**.
+Sync your SiYuan notes with a private GitHub repository via the GitHub REST API. Compatible with **Windows, Linux, macOS, and Android**.
 
-## Fonctionnalites
+## Features
 
-### Synchronisation des donnees
-- **Push incrémental** — Envoie uniquement les fichiers modifies
-- **Pull incrémental** — Recupere les fichiers distants modifies
-- **Merge automatique** — Fusion 3-way avant push (local / distant / dernier etat connu)
-- **Gestion des conflits** — Priorite locale en cas de conflit
+### Data Synchronization
+- **Incremental Push** — Sends only modified files
+- **Incremental Pull** — Retrieves modified remote files
+- **Automatic Merge** — 3-way merge before push (local / remote / last known state)
+- **Conflict Management** — Local priority in case of conflict
 
-### Synchronisation des plugins et widgets
-- **Sync des plugins** — Un manifeste (`plugin-manifest.json`) est push avec les donnees contenant la liste de tous les plugins installes (nom + version)
-- **Sync des widgets** — Un manifeste (`widget-manifest.json`) est push avec les donnees contenant la tous les widgets installes
-- **Installation automatique** — Au pull, les plugins/widgets manquants sont installes automatiquement depuis le marketplace officiel SiYuan
-- **Exclusion du plugin de sync** — `siyuan-github-sync` n'est jamais inclus dans les manifestes ni installe/supprime
+### Plugin and Widget Synchronization
+- **Plugin Sync** — A manifest (`plugin-manifest.json`) is pushed with data containing a list of all installed plugins (name + version)
+- **Widget Sync** — A manifest (`widget-manifest.json`) is pushed with data containing all installed widgets
+- **Automatic Installation** — On pull, missing plugins/widgets are automatically installed from the official SiYuan marketplace
+- **Plugin Sync Exclusion** — `siyuan-github-sync` Never included in manifests nor installed/removed
 
-### Historique et restauration
-- **Historique** — Consulte les 30 derniers commits
-- **Restauration** — Restaure un commit depuis l'historique
-- **Diff avant push** — Affiche les fichiers ajoutes/modifies/supprimes avant d'envoyer
+### History and Restore
+- **History** — Views the last 30 commits
+- **Restore** — Restores a commit from the history
+- **Diff before push** — Displays files added/modified/deleted before pushing
 
-### Autres
-- **Sécurise** — Token stocke localement via `saveData()`
-- **Groq AI** — Messages de commit generes automatiquement (optionnel)
-- **Export/Import** — Sauvegarde et restaure la configuration
+### Other
+- **Secure** — Stores tokens locally via `saveData()`
+- **Groq AI** — Automatically generates commit messages (optional)
+- **Export/Import** — Saves and restores the configuration
 
 ## Installation
 
-### Depuis le dossier compile
+### From the compile folder
 
-Copie le dossier `dist/` ou le dossier compile dans :
+Copy the `dist/` folder or the compiled folder to:
 ```
 {siyuan-workspace}/data/plugins/siyuan-github-sync/
 ```
 
-Puis redemarre SiYuan et active le plugin dans **Parametres → Marketplace → Installe**.
+Then restart SiYuan and activate the plugin in **Settings → Marketplace → Install**.
 
-### Build depuis les sources
+### Build from source
 
 ```bash
 npm install
 npm run build
 ```
 
-Le dossier `dist/` sera cree. Copie-le dans le dossier `data/plugins/` de SiYuan.
+The `dist/` folder will be created. Copy it to the `data/plugins/` folder of SiYuan.
 
-### Sur mobile Android
+### On Android mobile
 
-Utilise un gestionnaire de fichiers pour copier le dossier `siyuan-github-sync` dans `Android/data/com.example.siyuan/files/data/plugins/` (ou le chemin equivalent selon votre version).
+Use a file manager to copy the `siyuan-github-sync` folder to `Android/data/com.example.siyuan/files/data/plugins/` (or the equivalent path depending on your version).
 
 ## Configuration
 
-1. Ouvre **Parametres** → clique sur ⚙️ a cote de "GitHub Sync"
-2. Renseigne **Nom d'utilisateur GitHub**, **Nom du depot**, **Token PAT** (scope `repo`)
-3. Clique sur **Tester GitHub** pour verifier la connexion
-4. Appuie sur **Enregistrer**
+1. Open **Settings** → click on ⚙️ next to "GitHub Sync"
+2. Enter **GitHub Username**, **Repository Name**, **PAT (Personal Access Token) Token** (scope `repo`)
+3. Click on **Test GitHub** to verify the connection
+4. Click on **Save**
 
-## Comment fonctionne la sync des plugins/widgets
+## How Plugin/Widget Sync Works
 
 ### Push
-Le plugin scanne les dossiers `data/plugins/` et `data/widgets/`, lit chaque `plugin.json`/`widget.json`, et genere deux fichiers manifestes :
-- `data/plugin-manifest.json` — Liste des plugins installes (nom + version)
-- `data/widget-manifest.json` — Liste des widgets installes (nom + version)
+The plugin scans the `data/plugins/` and `data/widgets/` folders, reads each `plugin.json`/`widget.json` file, and generates two manifest files:
 
-Ces manifestes sont push alongside les autres fichiers de donnees.
+- `data/plugin-manifest.json` — List of installed plugins (name + version)
+- `data/widget-manifest.json` — List of installed widgets (name + version)
+
+These Manifests are pushed alongside the other data files.
 
 ### Pull
-Apres le pull des donnees, le plugin :
-1. Telecharge les deux manifestes depuis le depot distant
-2. Compare la liste des plugins/widgets distants avec ceux installes localement
-3. Installe automatiquement les plugins/widgets manquants depuis le marketplace SiYuan
-4. Affiche le resultat dans le message de fin du pull
+After the data pull, the plugin:
+1. Downloads the two manifests from the remote repository
+2. Compares the list of remote plugins/widgets with those installed locally
+3. Automatically installs any missing plugins/widgets from the SiYuan marketplace
+4. Displays the result in the pull completion message
 
-> **Note** : Seuls les plugins/widgets presents sur le marketplace officiel sont installes automatiquement. Les plugins custom ne sont pas geres.
+> **Note**: Only plugins/widgets available on the official marketplace are installed automatically. Custom plugins are not supported.
 
-## Developpement
+## Development
 
 ```bash
-npm run dev    # Mode watch
-./compile.sh   # Build + deploiement automatique vers SiYuan (Linux)
+npm run dev # Watch mode
+
+./compile.sh # Build + automatic deployment to SiYuan (Linux)
 ```
 
-## Licence
+## License
 
 MIT

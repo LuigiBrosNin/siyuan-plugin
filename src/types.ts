@@ -29,10 +29,11 @@ export interface GitHubConfig {
     token: string;
     groqKey: string;
     showDiff: boolean;
+    language?: string;
     lastSync?: number;
 }
 
-export const DEFAULT_CONFIG: GitHubConfig = { username: "", repo: "", token: "", groqKey: "", showDiff: true };
+export const DEFAULT_CONFIG: GitHubConfig = { username: "", repo: "", token: "", groqKey: "", showDiff: true, language: "fr" };
 
 export interface SiYuanDirEntry {
     name:    string;

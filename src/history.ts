@@ -1,4 +1,5 @@
 import { Dialog, showMessage } from "siyuan";
+import { t } from "./i18n";
 
 export class HistoryDialog {
     private dialog: Dialog;
@@ -9,16 +10,16 @@ export class HistoryDialog {
         private restoreCommit: (sha: string, msg: string) => Promise<void>,
     ) {
         this.dialog = new Dialog({
-            title: "📜 Historique des commits",
+            title: t('top.history_title'),
             content: `
                 <div class="b3-dialog__content" style="padding: 16px; max-height: 480px; overflow-y: auto;">
                     <div id="history-list" style="min-height: 80px;">
-                        <div style="text-align:center;padding:32px;color:var(--b3-theme-on-background);">Chargement...</div>
+                        <div style="text-align:center;padding:32px;color:var(--b3-theme-on-background);">${t('history.loading')}</div>
                     </div>
                 </div>
                 <div class="b3-dialog__action" style="padding: 8px 16px; border-top: 1px solid var(--b3-border-color);">
-                    <button id="history-refresh" class="b3-button b3-button--outline">🔄 Rafraîchir</button>
-                    <button id="history-close" class="b3-button b3-button--outline" style="margin-left: 8px;">Fermer</button>
+                    <button id="history-refresh" class="b3-button b3-button--outline">${t('button.refresh')}</button>
+                    <button id="history-close" class="b3-button b3-button--outline" style="margin-left: 8px;">${t('button.close')}</button>
                 </div>
             `,
             width: window.innerWidth < 600 ? `${window.innerWidth - 32}px` : "600px",
@@ -34,7 +35,7 @@ export class HistoryDialog {
         try {
             const commits = await this.getHistory();
             if (commits.length === 0) {
-                this.listEl.innerHTML = `<div style="text-align:center;padding:32px;color:var(--b3-theme-on-background);">Aucun commit trouvé.</div>`;
+                this.listEl.innerHTML = `<div style="text-align:center;padding:32px;color:var(--b3-theme-on-background);">${t('history.no_commits')}</div>`;
                 return;
             }
             let html = "";
@@ -64,7 +65,7 @@ export class HistoryDialog {
                         await this.restoreCommit(el.dataset.sha, el.dataset.msg);
                         this.dialog.destroy();
                     } catch (err) {
-                        showMessage(`❌ Restauration échouée : ${err.message}`, 6000, "error");
+                        showMessage(`${t('history.restore_failed')} ${err.message}`, 6000, "error");
                         el.disabled = false;
                         el.textContent = "Restaurer";
                     }
