@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+    #!/usr/bin/env bash
 set -euo pipefail
 
 PLUGIN_NAME="siyuan-github-sync"
@@ -71,13 +71,60 @@ if [ "$MODE" = "publish" ]; then
     echo -e "  File: ${YELLOW}$SCRIPT_DIR/dist/${ZIP_NAME}${NC}"
     echo ""
 else
-    if [ -n "${SIYUAN_WORKSPACE:-}" ]; then
-        SIYUAN_DATA="$SIYUAN_WORKSPACE/data"
-    elif [ -f "$HOME/.config/siyuan/workspace.json" ]; then
-        SIYUAN_DATA="$(grep -o '"[^"]*"' "$HOME/.config/siyuan/workspace.json" | head -1 | tr -d '"')/data"
-    else
-        SIYUAN_DATA="$HOME/.config/siyuan/data"
+    # Gather potential workspaces
+    WORKSPACES=()
+
+    # 1. Check environment variable
+    if [ -n "${SIYUAN_WORKSPACE:-}" ] && [ -d "$SIYUAN_WORKSPACE" ]; then
+        WORKSPACES+=("$SIYUAN_WORKSPACE")
     fi
+
+    # 2. Extract potential paths from workspace.json
+    if [ -f "$HOME/.config/siyuan/workspace.json" ]; then
+        while IFS= read -r extracted_path; do
+            if [ -d "$extracted_path" ]; then
+                WORKSPACES+=("$extracted_path")
+            fi
+        done < <(grep -o '"[^"]*"' "$HOME/.config/siyuan/workspace.json" | tr -d '"')
+    fi
+
+    # 3. Add default config path as a fallback
+    if [ -d "$HOME/.config/siyuan" ]; then
+        WORKSPACES+=("$HOME/.config/siyuan")
+    fi
+
+    # Deduplicate the list of workspaces
+    IFS=$'\n' read -r -d '' -a UNIQUE_WORKSPACES < <(printf '%s\n' "${WORKSPACES[@]}" | awk 'NF' | sort -u && printf '\0') || true
+
+    # Ensure at least one workspace was found
+    if [ ${#UNIQUE_WORKSPACES[@]} -eq 0 ]; then
+        echo -e "${RED}Error: No valid SiYuan workspaces found.${NC}"
+        exit 1
+    fi
+
+    # Auto-select if only one exists, otherwise prompt
+    if [ ${#UNIQUE_WORKSPACES[@]} -eq 1 ]; then
+        SELECTED_WORKSPACE="${UNIQUE_WORKSPACES[0]}"
+    else
+        echo -e "[3/3]  Select Workspace"
+        echo "Available SiYuan Workspaces:"
+        for i in "${!UNIQUE_WORKSPACES[@]}"; do
+            echo "  $((i+1))) ${UNIQUE_WORKSPACES[$i]}"
+        done
+
+        while true; do
+            read -p "Select a workspace to deploy the plugin (1-${#UNIQUE_WORKSPACES[@]}): " selection
+            if [[ "$selection" =~ ^[0-9]+$ ]] && [ "$selection" -ge 1 ] && [ "$selection" -le "${#UNIQUE_WORKSPACES[@]}" ]; then
+                SELECTED_WORKSPACE="${UNIQUE_WORKSPACES[$((selection-1))]}"
+                break
+            else
+                echo -e "${RED}Invalid selection. Please enter a number between 1 and ${#UNIQUE_WORKSPACES[@]}.${NC}"
+            fi
+        done
+        echo ""
+    fi
+
+    SIYUAN_DATA="$SELECTED_WORKSPACE/data"
     DEPLOY_DIR="$SIYUAN_DATA/plugins/$PLUGIN_NAME"
 
     echo -e "[3/3]  Deploying to: ${YELLOW}$DEPLOY_DIR${NC}"
