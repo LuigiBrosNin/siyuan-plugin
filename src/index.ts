@@ -25,7 +25,7 @@ import {
 } from "./manifests";
 import { SyncProgressUI, showDiffDialog } from "./ui";
 import { HistoryDialog } from "./history";
-import { t, setLocale, availableLocales, getLocale } from "./i18n";
+import { t, setLocale, availableLocales, getLocale, langs } from "./i18n";
 
 export default class GitHubSyncPlugin extends Plugin {
     private config: GitHubConfig = { ...DEFAULT_CONFIG };
@@ -169,7 +169,7 @@ export default class GitHubSyncPlugin extends Plugin {
         // language selector
         const langSelect = document.createElement("select");
         langSelect.className = "b3-select fn__block";
-        const _langLabels: Record<string,string> = { fr: 'Français', en: 'English' };
+        const _langLabels: Record<string, string> = langs;
         for (const loc of availableLocales()) {
             const opt = document.createElement("option");
             opt.value = loc; opt.textContent = _langLabels[loc] || loc;
