@@ -117,10 +117,10 @@ export default class GitHubSyncPlugin extends Plugin {
             const hasToken = !!tIn.value.trim();
             const hasGroq = !!gIn.value.trim();
             const warnParts: string[] = [];
-            if (hasToken) warnParts.push("the GitHub token");
-            if (hasGroq) warnParts.push("the Groq API key");
+            if (hasToken) warnParts.push(t('part.the') + "GitHub token");
+            if (hasGroq) warnParts.push(t('part.the') + "the Groq API key");
             if (warnParts.length > 0) {
-                const ok = confirm(`${t('msg.export_warning_prefix')} ${warnParts.join(" and ")} in cleartext.\nDo not share this file.`);
+                const ok = confirm(`${t('msg.export_warning_prefix')} ${warnParts.join(t('part.and'))}{t('part.export_warning_suffix')}`);
                 if (!ok) return;
             }
             const cfg = { username: uIn.value.trim(), repo: rIn.value.trim(), token: tIn.value.trim(), groqKey: gIn.value.trim(), showDiff: dIn.checked, language: (this.config && this.config.language) || 'fr' };
@@ -151,7 +151,7 @@ export default class GitHubSyncPlugin extends Plugin {
                     gIn.value = data.groqKey || ""; dIn.checked = !!data.showDiff;
                     if (data.language) { try { setLocale(data.language); } catch {} }
                     showMessage(t('msg.config_loaded'));
-                } catch { showMessage("❌ Invalid file", 6000, "error"); }
+                } catch { showMessage(t('error.invalid_file'), 6000, "error"); }
             };
             fi.click();
         };
@@ -197,13 +197,13 @@ export default class GitHubSyncPlugin extends Plugin {
     // ── Actions UI ───────────────────────────────────────────────────────────
 
     private handlePushClick() {
-        if (this.activeTask === "pull") { showMessage("⚠️ Pull en cours..."); return; }
+        if (this.activeTask === "pull") { showMessage(t('action.push')); return; }
         if (this.activeTask === "push") { this.showProgressUI("push"); return; }
         this.pushToGitHub();
     }
 
     private handlePullClick() {
-        if (this.activeTask === "push") { showMessage("⚠️ Push en cours..."); return; }
+        if (this.activeTask === "push") { showMessage(t('action.pull')); return; }
         if (this.activeTask === "pull") { this.showProgressUI("pull"); return; }
         this.pullFromGitHub();
     }
@@ -295,9 +295,9 @@ export default class GitHubSyncPlugin extends Plugin {
     // ── Push ─────────────────────────────────────────────────────────────────
 
     private async pushToGitHub() {
-        if (!this.config.token) return showMessage("⚠️ Configurez le plugin.");
+        if (!this.config.token) return showMessage(t('msg.configure_plugin'));
         this.activeTask = "push";
-        this.lastProgress = { percent: 0, status: t('progress.analysis'), details: "Comparaison des SHAs...", finished: false, error: false, message: "" };
+        this.lastProgress = { percent: 0, status: t('progress.analysis'), details: "Checking SHAs...", finished: false, error: false, message: "" };
         this.showProgressUI("push");
 
         try {
@@ -380,7 +380,7 @@ export default class GitHubSyncPlugin extends Plugin {
                 this.updateProgress(10 + Math.round((i / plan.toUpload.length) * 75), `Upload : ${i + 1}/${plan.toUpload.length}`, u.githubPath);
                 const blobRes = await api.createBlob(arrayBufferToBase64(u.content));
                 if (!blobRes.ok) {
-                    console.error(`[GitHub Sync] Blob échoué pour ${u.githubPath}:`, await blobRes.text());
+                    console.error(`[GitHub Sync] Blob failed for ${u.githubPath}:`, await blobRes.text());
                     continue;
                 }
                 const blobData = await blobRes.json();
@@ -452,10 +452,8 @@ export default class GitHubSyncPlugin extends Plugin {
             if (plan.toReuse.length) parts.push(`${plan.toReuse.length} ${t('stat.unchanged')}`);
             let msg = `${t('msg.push_done_prefix')} ${parts.join(", ")}.`;
             if (plan.skippedLarge) msg += ` ⚠️ ${plan.skippedLarge} ${t('msg.skipped_files')}`;
-            if (plan.conflicted.length) {
-                const conflictNote = getLocale && getLocale() === 'en'
-                    ? ` ⚠️ ${plan.conflicted.length} conflict(s) unresolved (modified on both sides).`
-                    : ` ⚠️ ${plan.conflicted.length} conflit(s) non résolu(s) (modifié des 2 côtés).`;
+          if (plan.conflicted.length) {
+                const conflictNote = t('msg.conflicts_unresolved').replace('{n}', String(plan.conflicted.length));
                 msg += conflictNote;
             }
             this.lastProgress = { ...this.lastProgress, finished: true, message: msg };
@@ -482,7 +480,7 @@ export default class GitHubSyncPlugin extends Plugin {
             const res = await api.putContent(u.githubPath, `Sync init : ${u.githubPath}`, arrayBufferToBase64(u.content), branch);
             if (!res.ok) {
                 const err = await res.json().catch(() => ({ message: "unknown" }));
-                console.error(`[GitHub Sync] Erreur upload ${u.githubPath}:`, err.message);
+                console.error(`[GitHub Sync] Error upload ${u.githubPath}:`, err.message);
                 errors++;
             }
             uploaded++;
@@ -503,11 +501,11 @@ export default class GitHubSyncPlugin extends Plugin {
 
         let notebooksUploadedInit = 0;
         for (const nm of notebookManifests) {
-            this.updateProgress(95 + Math.round((notebooksUploadedInit / notebookManifests.length) * 4), `Upload manifeste carnet ${notebooksUploadedInit + 1}/${notebookManifests.length}...`, nm.githubPath);
+            this.updateProgress(95 + Math.round((notebooksUploadedInit / notebookManifests.length) * 4), `Upload manifest notebook ${notebooksUploadedInit + 1}/${notebookManifests.length}...`, nm.githubPath);
             const nmRes = await api.putContent(nm.githubPath, `Sync init : ${nm.githubPath}`, arrayBufferToBase64(nm.content), branch);
             if (!nmRes.ok) {
                 const errText = await nmRes.json().catch(() => ({ message: "unknown" }));
-                console.error(`[GitHub Sync] Erreur upload ${nm.githubPath}:`, errText.message);
+                console.error(`[GitHub Sync] Error upload ${nm.githubPath}:`, errText.message);
                 errors++;
             }
             notebooksUploadedInit++;
@@ -524,7 +522,7 @@ export default class GitHubSyncPlugin extends Plugin {
         }
 
         let msg = t('msg.push_initial_done').replace('{n}', String(uploaded));
-        if (errors > 0) msg += ` ⚠️ ${errors} erreur(s).`;
+        if (errors > 0) msg += t('msg.errors_occurred').replace('{n}', String(errors));
         this.lastProgress = { ...this.lastProgress, finished: true, message: msg };
         if (this.currentUI) this.currentUI.finish(msg);
     }
@@ -532,7 +530,7 @@ export default class GitHubSyncPlugin extends Plugin {
     // ── Pull ─────────────────────────────────────────────────────────────────
 
     private async pullFromGitHub() {
-        if (!this.config.token) return showMessage("⚠️ Configurez le plugin.");
+        if (!this.config.token) return showMessage(t('msg.configure_plugin'));
         this.activeTask = "pull";
         this.lastProgress = { percent: 0, status: t('progress.analysis'), details: t('progress.reading_remote'), finished: false, error: false, message: "" };
         this.showProgressUI("pull");
@@ -584,10 +582,10 @@ export default class GitHubSyncPlugin extends Plugin {
                     if (content && content.byteLength > 0) {
                         const ok = await siYuanPutFile(siPath, content);
                         if (ok) { updated++; }
-                        else { errors++; console.error(`[GitHub Sync] Écriture échouée: ${siPath}`); }
+                        else { errors++; console.error(`[GitHub Sync] Write Failed: ${siPath}`); }
                     } else {
                         errors++;
-                        console.error(`[GitHub Sync] Téléchargement échoué: ${item.path}`);
+                        console.error(`[GitHub Sync] Load Failed: ${item.path}`);
                     }
                 }
                 await sleep(30);
@@ -674,7 +672,7 @@ export default class GitHubSyncPlugin extends Plugin {
     // ── Historique & Restauration ──────────────────────────────────────────
 
     private async handleHistoryClick() {
-        if (!this.config.token) return showMessage("⚠️ Configurez le plugin.");
+        if (!this.config.token) return showMessage(t('msg.configure_plugin'));
         new HistoryDialog(
             () => this.getHistory(),
             (sha: string, msg: string) => this.restoreCommit(sha, msg),

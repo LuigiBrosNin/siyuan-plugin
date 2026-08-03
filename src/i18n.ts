@@ -16,7 +16,7 @@ const locales: Record<string, LocaleMap> = {
     'setting.groq_key': 'Clé API Groq (optionnel)',
     'setting.show_diff': 'Afficher le diff avant push',
     'setting.actions': 'Actions',
-    'setting.language': 'Langue',
+    'setting.language': 'Langue (requiert un redémarrage)',
 
     'button.test_github': '🔍 Tester GitHub',
     'button.export': '📤 Exporter',
@@ -30,6 +30,10 @@ const locales: Record<string, LocaleMap> = {
     'msg.config_loaded': '✅ Config chargée. Appuie sur Enregistrer.',
     'msg.saved': '✅ Enregistré',
     'msg.configure_plugin': '⚠️ Configurez le plugin.',
+
+    'part.the': 'le ',
+    'part.and': ' et ',
+    'part.export_warning_suffix': ' en clair.\nNe partagez pas ce fichier.',
 
     'progress.analysis': 'Analyse...',
     'progress.reading_remote': 'Lecture du dépôt distant...',
@@ -52,6 +56,8 @@ const locales: Record<string, LocaleMap> = {
     'error.rate_limit': '❌ Limite d\'appels API GitHub atteinte. Réessaie dans 1 minute.',
     'error.request_aborted': '❌ Requête annulée (timeout). Réessaie.',
     'error.file_too_large': '❌ Fichier trop volumineux (>25 Mo). Ignoré.',
+    'error.invalid_file': '❌ Fichier invalide.',
+
 
     'merge.status': 'Merge...',
     'merge.compare': 'Comparaison local / distant / dernière sync...',
@@ -82,8 +88,11 @@ const locales: Record<string, LocaleMap> = {
     'msg.widgets_installed': '🧩 {n} widget(s) installé(s).',
     'msg.themes_installed': '🎨 {n} thème(s) installé(s).',
     'msg.notebooks_processed': '📓 {n} carnet(s) ouvert(s).',
-    'msg.errors': '⚠️ {n} erreur(s).',
+    'msg.errors': '⚠️ {n} erreur(s): Ouvrez les outils de développement pour afficher les détails (ctrl+shift+i) .',
     'msg.restored': '✅ Restauré : {n} fichiers (commit: {sha} — {message})',
+
+    'action.push': '⚠️ Push en cours...',
+    'action.pull': '⚠️ Pull en cours...',
   },
   en: {
     'status.initializing': 'Initializing...',
@@ -100,7 +109,7 @@ const locales: Record<string, LocaleMap> = {
     'setting.groq_key': 'Groq API Key (optional)',
     'setting.show_diff': 'Show diff before push',
     'setting.actions': 'Actions',
-    'setting.language': 'Language',
+    'setting.language': 'Language (requires restart)',
 
     'button.test_github': '🔍 Test GitHub',
     'button.export': '📤 Export',
@@ -114,6 +123,10 @@ const locales: Record<string, LocaleMap> = {
     'msg.config_loaded': '✅ Config loaded. Press Save.',
     'msg.saved': '✅ Saved',
     'msg.configure_plugin': '⚠️ Configure the plugin.',
+
+    'part.the': 'the ',
+    'part.and': ' and ',
+    'part.export_warning_suffix': ' in cleartext.\nDo not share this file.',
 
     'progress.analysis': 'Analysis...',
     'progress.reading_remote': 'Reading remote repository...',
@@ -136,6 +149,7 @@ const locales: Record<string, LocaleMap> = {
     'error.rate_limit': '❌ GitHub API rate limit reached. Try again in 1 minute.',
     'error.request_aborted': '❌ Request aborted (timeout). Try again.',
     'error.file_too_large': '❌ File too large (>25 MB). Ignored.',
+    'error.invalid_file': '❌ Invalid file.',
 
     'merge.status': 'Merge...',
     'merge.compare': 'Compare local / remote / last sync...',
@@ -167,8 +181,11 @@ const locales: Record<string, LocaleMap> = {
     'msg.widgets_installed': '🧩 {n} widget(s) installed.',
     'msg.themes_installed': '🎨 {n} theme(s) installed.',
     'msg.notebooks_processed': '📓 {n} notebook(s) opened.',
-    'msg.errors': '⚠️ {n} error(s).',
+    'msg.errors': '⚠️ {n} error(s): Open dev tools to see details (ctrl+shift+i).',
     'msg.restored': '✅ Restored: {n} files (commit: {sha} — {message})',
+
+    'action.push': '⚠️ Push in progress...',
+    'action.pull': '⚠️ Pull in progress...',
 
   }
 };
