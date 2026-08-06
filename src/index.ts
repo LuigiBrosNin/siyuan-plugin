@@ -383,6 +383,9 @@ export default class GitHubSyncPlugin extends Plugin {
                     console.error(`[GitHub Sync] Blob failed for ${u.githubPath}:`, await blobRes.text());
                     continue;
                 }
+
+                await sleep(1000); // slight delay to avoid hitting rate limits
+
                 const blobData = await blobRes.json();
                 treeItems.push({ path: u.githubPath, mode: "100644", type: "blob", sha: blobData.sha });
                 uploadedSummaries.push({ path: u.githubPath, content: extractTextFromSyFile(u.content) });
@@ -483,8 +486,9 @@ export default class GitHubSyncPlugin extends Plugin {
                 console.error(`[GitHub Sync] Error upload ${u.githubPath}:`, err.message);
                 errors++;
             }
-            uploaded++;
-            if (uploaded % 5 === 0) await sleep(100);
+          uploaded++;
+          // recommended safenet delay, by GitHub API docs
+          await sleep(1000);
         }
 
         this.updateProgress(90, t('progress.upload_plugin_manifest'), pluginManifest.githubPath);
