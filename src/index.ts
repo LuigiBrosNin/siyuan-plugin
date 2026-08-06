@@ -262,12 +262,14 @@ export default class GitHubSyncPlugin extends Plugin {
             if (localSha === remoteSha) {
                 plan.toReuse.push({ githubPath: f.githubPath, sha: remoteSha });
             } else if (!remoteSha) {
-                plan.toUpload.push({ githubPath: f.githubPath, content });
+                // Store path reference only
+                plan.toUpload.push({ githubPath: f.githubPath, siYuanPath: f.siYuanPath });
             } else if (!syncedSha || localSha !== syncedSha) {
                 if (remoteSha !== syncedSha) {
                     plan.conflicted.push({ githubPath: f.githubPath, siYuanPath: f.siYuanPath });
                 } else {
-                    plan.toUpload.push({ githubPath: f.githubPath, content });
+                    // Store path reference only
+                    plan.toUpload.push({ githubPath: f.githubPath, siYuanPath: f.siYuanPath });
                 }
             } else {
                 plan.toPull.push({ githubPath: f.githubPath, siYuanPath: f.siYuanPath });
@@ -378,17 +380,22 @@ export default class GitHubSyncPlugin extends Plugin {
             for (let i = 0; i < plan.toUpload.length; i++) {
                 const u = plan.toUpload[i];
                 this.updateProgress(10 + Math.round((i / plan.toUpload.length) * 75), `Upload : ${i + 1}/${plan.toUpload.length}`, u.githubPath);
-                const blobRes = await api.createBlob(arrayBufferToBase64(u.content));
+
+                // LAZY LOAD: Fetch file from SiYuan only at the exact moment of upload
+                // avoid keeping potentially large files in RAM
+                const content = await siYuanGetFile(u.siYuanPath);
+                if (!content) continue;
+
+                const blobRes = await api.createBlob(arrayBufferToBase64(content));
                 if (!blobRes.ok) {
                     console.error(`[GitHub Sync] Blob failed for ${u.githubPath}:`, await blobRes.text());
                     continue;
                 }
-
-                await sleep(1000); // slight delay to avoid hitting rate limits
-
+                await sleep(1000);
                 const blobData = await blobRes.json();
                 treeItems.push({ path: u.githubPath, mode: "100644", type: "blob", sha: blobData.sha });
-                uploadedSummaries.push({ path: u.githubPath, content: extractTextFromSyFile(u.content) });
+                uploadedSummaries.push({ path: u.githubPath, content: extractTextFromSyFile(content) });
+                // 'content' variable falls out of scope here, freeing RAM.
             }
 
             for (const d of plan.toDelete) {
@@ -477,56 +484,57 @@ export default class GitHubSyncPlugin extends Plugin {
         let uploaded = 0;
         const total = plan.toUpload.length;
         let errors = 0;
+        const treeItems: any[] = [];
 
+        // 1. Upload Blobs lazily
         for (const u of plan.toUpload) {
             this.updateProgress(10 + Math.round((uploaded / Math.max(total, 1)) * 80), `Upload : ${uploaded + 1}/${total}`, u.githubPath);
-            const res = await api.putContent(u.githubPath, `Sync init : ${u.githubPath}`, arrayBufferToBase64(u.content), branch);
-            if (!res.ok) {
-                const err = await res.json().catch(() => ({ message: "unknown" }));
-                console.error(`[GitHub Sync] Error upload ${u.githubPath}:`, err.message);
+
+            const content = await siYuanGetFile(u.siYuanPath);
+            if (!content) continue;
+
+            const blobRes = await api.createBlob(arrayBufferToBase64(content));
+            if (blobRes.ok) {
+                const blobData = await blobRes.json();
+                treeItems.push({ path: u.githubPath, mode: "100644", type: "blob", sha: blobData.sha });
+                uploaded++;
+            } else {
                 errors++;
             }
-          uploaded++;
-          // recommended safenet delay, by GitHub API docs
-          await sleep(1000);
+            await sleep(1000);
         }
 
-        this.updateProgress(90, t('progress.upload_plugin_manifest'), pluginManifest.githubPath);
-        const manifestRes = await api.putContent(pluginManifest.githubPath, "Sync init : plugin manifest", arrayBufferToBase64(pluginManifest.content), branch);
-        if (!manifestRes.ok) errors++;
-
-        this.updateProgress(93, t('progress.upload_widget_manifest'), widgetManifest.githubPath);
-        const widgetManifestRes = await api.putContent(widgetManifest.githubPath, "Sync init : widget manifest", arrayBufferToBase64(widgetManifest.content), branch);
-        if (!widgetManifestRes.ok) errors++;
-
-        this.updateProgress(94, t('progress.upload_theme_manifest'), themeManifest.githubPath);
-        const themeManifestRes = await api.putContent(themeManifest.githubPath, "Sync init : theme manifest", arrayBufferToBase64(themeManifest.content), branch);
-        if (!themeManifestRes.ok) errors++;
-
-        let notebooksUploadedInit = 0;
-        for (const nm of notebookManifests) {
-            this.updateProgress(95 + Math.round((notebooksUploadedInit / notebookManifests.length) * 4), `Upload manifest notebook ${notebooksUploadedInit + 1}/${notebookManifests.length}...`, nm.githubPath);
-            const nmRes = await api.putContent(nm.githubPath, `Sync init : ${nm.githubPath}`, arrayBufferToBase64(nm.content), branch);
-            if (!nmRes.ok) {
-                const errText = await nmRes.json().catch(() => ({ message: "unknown" }));
-                console.error(`[GitHub Sync] Error upload ${nm.githubPath}:`, errText.message);
+        // 2. Upload Manifest Blobs
+        const manifests = [pluginManifest, widgetManifest, themeManifest, ...notebookManifests];
+        for (const m of manifests) {
+            const mRes = await api.createBlob(arrayBufferToBase64(m.content));
+            if (mRes.ok) {
+                const mData = await mRes.json();
+                treeItems.push({ path: m.githubPath, mode: "100644", type: "blob", sha: mData.sha });
+            } else {
                 errors++;
             }
-            notebooksUploadedInit++;
         }
 
-        const newRefRes = await api.getRef(branch);
-        if (newRefRes.ok) {
-            const newRef = await newRefRes.json();
-            const newCommit = await (await api.getCommit(newRef.object.sha)).json();
-            const newTree = await api.getRemoteTree(newCommit.tree.sha);
+        // 3. Create a single Tree and Commit
+        if (treeItems.length > 0) {
+            this.updateProgress(90, t('progress.finalizing'), t('progress.creating_tree'));
+            const treeRes = await api.createTree("", treeItems); // Base tree empty for initial
+            const treeData = await treeRes.json();
+
+            const commitRes = await api.createCommit("Sync init", treeData.sha, []); // No parents for initial commit
+            const commitData = await commitRes.json();
+
+            await api.updateRef(branch, commitData.sha);
+
             const newFilesState: Record<string, string> = {};
-            newTree.forEach(item => { if (item.type === "blob") newFilesState[item.path] = item.sha; });
-            await this.saveSyncedState(newRef.object.sha, newFilesState);
+            treeItems.forEach(item => { newFilesState[item.path] = item.sha; });
+            await this.saveSyncedState(commitData.sha, newFilesState);
         }
 
         let msg = t('msg.push_initial_done').replace('{n}', String(uploaded));
         if (errors > 0) msg += t('msg.errors_occurred').replace('{n}', String(errors));
+
         this.lastProgress = { ...this.lastProgress, finished: true, message: msg };
         if (this.currentUI) this.currentUI.finish(msg);
     }

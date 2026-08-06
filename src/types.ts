@@ -60,7 +60,7 @@ export interface SyncedState {
 }
 
 export interface MergePlan {
-    toUpload:    { githubPath: string; content: ArrayBuffer }[];
+    toUpload:    { githubPath: string; siYuanPath: string }[];
     toReuse:     { githubPath: string; sha: string }[];
     toDelete:    { githubPath: string }[];
     toPull:      { githubPath: string; siYuanPath: string }[];
