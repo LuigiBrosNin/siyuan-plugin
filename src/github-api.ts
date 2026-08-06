@@ -3,137 +3,199 @@ import { encodePath, base64ToArrayBuffer, sleep } from "./utils";
 import { t } from "./i18n";
 
 export class GitHubAPI {
-    constructor(
-        private token: string,
-        private username: string,
-        private repo: string,
-    ) {}
+	constructor(
+		private token: string,
+		private username: string,
+		private repo: string,
+	) {}
 
-    async gh(path: string, method = "GET", body?: object, retries = 3): Promise<Response> {
-      const url = `${GITHUB_API}${path}`;
-      let attempt = 0;
+	async gh(
+		path: string,
+		method = "GET",
+		body?: object,
+		retries = 3,
+	): Promise<Response> {
+		const url = `${GITHUB_API}${path}`;
+		let attempt = 0;
 
-      // comply with GitHub's rate limits
-      while (attempt < retries) {
-        console.debug(`[GitHub Sync] API Request: ${method} ${url} (Attempt ${attempt + 1})`);
+		// comply with GitHub's rate limits
+		while (attempt < retries) {
+			console.debug(
+				`[GitHub Sync] API Request: ${method} ${url} (Attempt ${attempt + 1})`,
+			);
 
-        // request GitHub info
-        const res = await fetch(url, {
-          method,
-          headers: {
-            Authorization: `Bearer ${this.token}`,
-            "Content-Type": "application/json",
-            Accept: "application/vnd.github+json"
-          },
-          body: body ? JSON.stringify(body) : undefined
-        });
+			// request GitHub info
+			const res = await fetch(url, {
+				method,
+				headers: {
+					Authorization: `Bearer ${this.token}`,
+					"Content-Type": "application/json",
+					Accept: "application/vnd.github+json",
+				},
+				body: body ? JSON.stringify(body) : undefined,
+			});
 
-        // check rate limit headers
-        const remaining = res.headers.get("x-ratelimit-remaining");
-        if (remaining) {
-          console.debug(`[GitHub Sync] Rate limit remaining: ${remaining}`);
-        }
+			// check rate limit headers
+			const remaining = res.headers.get("x-ratelimit-remaining");
+			if (remaining) {
+				console.debug(`[GitHub Sync] Rate limit remaining: ${remaining}`);
+			}
 
-        // handle rate limiting
-        if (res.status === 403 || res.status === 429) {
-          const retryAfter = res.headers.get("retry-after");
-          const resetTime = res.headers.get("x-ratelimit-reset");
-          let waitTime = 1000;
+			// handle rate limiting
+			if (res.status === 403 || res.status === 429) {
+				const retryAfter = res.headers.get("retry-after");
+				const resetTime = res.headers.get("x-ratelimit-reset");
+				let waitTime = 1000;
 
-          if (retryAfter) {
-            waitTime = parseInt(retryAfter, 10) * 1000;
-            console.warn(`[GitHub Sync] Secondary rate limit hit. Server requested backoff via Retry-After. Waiting ${waitTime}ms.`);
-          } else if (resetTime) {
-            const resetMs = parseInt(resetTime, 10) * 1000;
-            waitTime = Math.max(1000, resetMs - Date.now() + 1000);
-            console.warn(`[GitHub Sync] Primary rate limit hit. Reset at ${new Date(resetMs).toLocaleTimeString()}. Waiting ${waitTime}ms.`);
-          } else {
-            waitTime = Math.pow(2, attempt) * 2000;
-            console.warn(`[GitHub Sync] Rate limit hit with no headers. Using exponential backoff. Waiting ${waitTime}ms.`);
-          }
+				if (retryAfter) {
+					waitTime = parseInt(retryAfter, 10) * 1000;
+					console.warn(
+						`[GitHub Sync] Secondary rate limit hit. Server requested backoff via Retry-After. Waiting ${waitTime}ms.`,
+					);
+				} else if (resetTime) {
+					const resetMs = parseInt(resetTime, 10) * 1000;
+					waitTime = Math.max(1000, resetMs - Date.now() + 1000);
+					console.warn(
+						`[GitHub Sync] Primary rate limit hit. Reset at ${new Date(resetMs).toLocaleTimeString()}. Waiting ${waitTime}ms.`,
+					);
+				} else {
+					waitTime = Math.pow(2, attempt) * 2000;
+					console.warn(
+						`[GitHub Sync] Rate limit hit with no headers. Using exponential backoff. Waiting ${waitTime}ms.`,
+					);
+				}
 
-          await sleep(waitTime);
-          attempt++;
-          continue;
-        }
+				await sleep(waitTime);
+				attempt++;
+				continue;
+			}
 
-        if (!res.ok) {
-          console.error(`[GitHub Sync] API Error: ${res.status} ${res.statusText} on ${path}`);
-        }
+			if (!res.ok) {
+				console.error(
+					`[GitHub Sync] API Error: ${res.status} ${res.statusText} on ${path}`,
+				);
+			}
 
-        return res;
-      }
+			return res;
+		}
 
-      throw new Error(`[GitHub Sync] Failed after ${retries} retries due to rate limiting.`);
-    }
+		throw new Error(
+			`[GitHub Sync] Failed after ${retries} retries due to rate limiting.`,
+		);
+	}
 
-    async getRemoteTree(treeSha: string): Promise<GitHubTreeItem[]> {
-        const res = await this.gh(`/repos/${this.username}/${this.repo}/git/trees/${treeSha}?recursive=1`);
-        const data = await res.json();
-        return (data.tree || []) as GitHubTreeItem[];
-    }
+	async getRemoteTree(treeSha: string): Promise<GitHubTreeItem[]> {
+		// Intercept the universally empty tree hash before the API call is made
+		if (treeSha === "4b825dc642cb6eb9a060e54bf8d69288fbee4904") {
+			return [];
+		}
 
-    async downloadFile(path: string, ref?: string): Promise<ArrayBuffer | null> {
-        try {
-            const url = `/repos/${this.username}/${this.repo}/contents/${encodePath(path)}` + (ref ? `?ref=${ref}` : "");
-            const res = await this.gh(url);
-            if (!res.ok) return null;
-            const data = await res.json();
-            if (!data.content) return null;
-            return base64ToArrayBuffer(data.content);
-        } catch { return null; }
-    }
+		const res = await this.gh(
+			`/repos/${this.username}/${this.repo}/git/trees/${treeSha}?recursive=1`,
+		);
 
-    async testConnection(): Promise<boolean> {
-        try {
-            const res = await this.gh(`/repos/${this.username}/${this.repo}`);
-            return res.status === 200;
-        } catch { return false; }
-    }
+		// Handle legitimate 404s gracefully without throwing unhandled exceptions
+		if (!res.ok) {
+			if (res.status === 404) return [];
+			throw new Error(`[GitHub Sync] Failed to fetch tree: ${res.statusText}`);
+		}
 
-    async getCommits(): Promise<any[]> {
-        const res = await this.gh(`/repos/${this.username}/${this.repo}/commits?per_page=30`);
-        if (!res.ok) throw new Error(t('msg.repo_empty'));
-        return res.json();
-    }
+		const data = await res.json();
+		return (data.tree || []) as GitHubTreeItem[];
+	}
 
-    getRepoInfo() {
-        return this.gh(`/repos/${this.username}/${this.repo}`);
-    }
+	async downloadFile(path: string, ref?: string): Promise<ArrayBuffer | null> {
+		try {
+			const url =
+				`/repos/${this.username}/${this.repo}/contents/${encodePath(path)}` +
+				(ref ? `?ref=${ref}` : "");
+			const res = await this.gh(url);
+			if (!res.ok) return null;
+			const data = await res.json();
+			if (!data.content) return null;
+			return base64ToArrayBuffer(data.content);
+		} catch {
+			return null;
+		}
+	}
 
-    getRef(branch: string) {
-        return this.gh(`/repos/${this.username}/${this.repo}/git/refs/heads/${branch}`);
-    }
+	async testConnection(): Promise<boolean> {
+		try {
+			const res = await this.gh(`/repos/${this.username}/${this.repo}`);
+			return res.status === 200;
+		} catch {
+			return false;
+		}
+	}
 
-    getCommit(sha: string) {
-        return this.gh(`/repos/${this.username}/${this.repo}/git/commits/${sha}`);
-    }
+	async getCommits(): Promise<any[]> {
+		const res = await this.gh(
+			`/repos/${this.username}/${this.repo}/commits?per_page=30`,
+		);
+		if (!res.ok) throw new Error(t("msg.repo_empty"));
+		return res.json();
+	}
 
-    createBlob(content: string) {
-        return this.gh(`/repos/${this.username}/${this.repo}/git/blobs`, "POST", {
-            content, encoding: "base64"
-        });
-    }
+	getRepoInfo() {
+		return this.gh(`/repos/${this.username}/${this.repo}`);
+	}
 
-    createTree(baseTree: string, treeItems: any[]) {
-        return this.gh(`/repos/${this.username}/${this.repo}/git/trees`, "POST", {
-            base_tree: baseTree, tree: treeItems
-        });
-    }
+	getRef(branch: string) {
+		return this.gh(
+			`/repos/${this.username}/${this.repo}/git/refs/heads/${branch}`,
+		);
+	}
 
-    createCommit(message: string, tree: string, parents: string[]) {
-        return this.gh(`/repos/${this.username}/${this.repo}/git/commits`, "POST", {
-            message, tree, parents
-        });
-    }
+	getCommit(sha: string) {
+		return this.gh(`/repos/${this.username}/${this.repo}/git/commits/${sha}`);
+	}
 
-    updateRef(branch: string, sha: string) {
-        return this.gh(`/repos/${this.username}/${this.repo}/git/refs/heads/${branch}`, "PATCH", { sha });
-    }
+	createBlob(content: string) {
+		return this.gh(`/repos/${this.username}/${this.repo}/git/blobs`, "POST", {
+			content,
+			encoding: "base64",
+		});
+	}
 
-    putContent(path: string, message: string, content: string, branch: string) {
-        return this.gh(`/repos/${this.username}/${this.repo}/contents/${encodePath(path)}`, "PUT", {
-            message, content, branch
-        });
-    }
+	// github-api.ts
+	createTree(baseTree: string, treeItems: any[]) {
+		const payload: any = { tree: treeItems };
+		// Only attach base_tree if it exists
+		if (baseTree) {
+			payload.base_tree = baseTree;
+		}
+		return this.gh(
+			`/repos/${this.username}/${this.repo}/git/trees`,
+			"POST",
+			payload,
+		);
+	}
+
+	createCommit(message: string, tree: string, parents: string[]) {
+		return this.gh(`/repos/${this.username}/${this.repo}/git/commits`, "POST", {
+			message,
+			tree,
+			parents,
+		});
+	}
+
+	updateRef(branch: string, sha: string) {
+		return this.gh(
+			`/repos/${this.username}/${this.repo}/git/refs/heads/${branch}`,
+			"PATCH",
+			{ sha },
+		);
+	}
+
+	putContent(path: string, message: string, content: string, branch: string) {
+		return this.gh(
+			`/repos/${this.username}/${this.repo}/contents/${encodePath(path)}`,
+			"PUT",
+			{
+				message,
+				content,
+				branch,
+			},
+		);
+	}
 }

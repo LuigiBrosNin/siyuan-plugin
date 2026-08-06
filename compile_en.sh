@@ -88,11 +88,6 @@ else
         done < <(grep -o '"[^"]*"' "$HOME/.config/siyuan/workspace.json" | tr -d '"')
     fi
 
-    # 3. Add default config path as a fallback
-    if [ -d "$HOME/.config/siyuan" ]; then
-        WORKSPACES+=("$HOME/.config/siyuan")
-    fi
-
     # Deduplicate the list of workspaces
     IFS=$'\n' read -r -d '' -a UNIQUE_WORKSPACES < <(printf '%s\n' "${WORKSPACES[@]}" | awk 'NF' | sort -u && printf '\0') || true
 
