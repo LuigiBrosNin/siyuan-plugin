@@ -83,6 +83,8 @@ const locales: Record<string, LocaleMap> = {
 		"error.request_aborted": "❌ Requête annulée (timeout). Réessaie.",
 		"error.file_too_large": "⚠️ Fichier trop volumineux (>25 Mo). Ignoré.",
 		"error.invalid_file": "❌ Fichier invalide.",
+		"error.pull_verification_failed":
+			"❌ Vérification du pull échouée. Le dépôt distant a peut-être été modifié en dehors de ce plugin. Veuillez vérifier les erreurs dans la console ou le dépôt.",
 
 		"merge.status": "Merge...",
 		"merge.compare": "Comparaison local / distant / dernière sync...",
@@ -133,9 +135,11 @@ const locales: Record<string, LocaleMap> = {
 		"status.initializing": "Initializing...",
 		"status.ok": "✅ OK",
 		"status.error": "❌ Error",
+
 		"top.push_title": "⬆️ Smart Push (Incremental)",
 		"top.pull_title": "⬇️ Smart Pull (Incremental)",
 		"top.history_title": "🕒 Commit history",
+
 		"setting.github_user": "GitHub User",
 		"setting.github_repo": "GitHub Repo",
 		"setting.github_token": "GitHub Token PAT",
@@ -143,6 +147,7 @@ const locales: Record<string, LocaleMap> = {
 		"setting.show_diff": "Show diff before push",
 		"setting.actions": "Actions",
 		"setting.language": "Language (requires restart)",
+
 		"button.test_github": "🧪 Test GitHub",
 		"button.export": "📥 Export",
 		"button.import": "📤 Import",
@@ -152,17 +157,20 @@ const locales: Record<string, LocaleMap> = {
 		"button.forget_password": "🗑️ Forget password",
 		"button.show": "Show",
 		"button.hide": "Hide",
+
 		"msg.export_warning_prefix": "⚠️ Warning: exported file will contain",
 		"msg.config_exported": "✅ Config exported",
 		"msg.config_loaded": "✅ Config loaded. Press Save.",
 		"msg.saved": "✅ Saved",
 		"msg.configure_plugin": "⚠️ Configure the plugin.",
+
 		"setting.encryption_password": "Encryption password",
 		"setting.encryption_salt": "Encryption salt",
 		"hint.encryption_password":
 			"Enter a password to enable client-side encryption. Do NOT lose it : without it data cannot be decrypted.",
 		"msg.password_forgot":
 			"Encryption password cleared from memory; you will not be able to decrypt previously uploaded data without it.",
+
 		"part.the": "the ",
 		"part.and": " and ",
 		"part.export_warning_suffix": " in cleartext.\nDo not share this file.",
@@ -185,6 +193,7 @@ const locales: Record<string, LocaleMap> = {
 		"history.no_commits": "No commits found.",
 		"history.loading": "Loading...",
 		"history.restore_failed": "❌ Restore failed:",
+
 		"error.token_invalid":
 			"❌ GitHub token invalid or expired. Go to Settings -> generate a new token.",
 		"error.repo_not_found":
@@ -195,6 +204,8 @@ const locales: Record<string, LocaleMap> = {
 		"error.request_aborted": "❌ Request aborted (timeout). Try again.",
 		"error.file_too_large": "⚠️ File too large (>25 MB). Ignored.",
 		"error.invalid_file": "❌ Invalid file.",
+		"error.pull_verification_failed": "❌ Pull verification failed. The remote repository may have been modified outside of this plugin. Please check errors in the console or the repository",
+
 		"merge.status": "Merge...",
 		"merge.compare": "Compare local / remote / last sync...",
 		"msg.no_changes_conflicts":
@@ -295,6 +306,9 @@ const locales: Record<string, LocaleMap> = {
 		"error.request_aborted": "❌ 请求被中止 (超时)。",
 		"error.file_too_large": "⚠️ 文件过大 (>25 MB)，已跳过。",
 		"error.invalid_file": "❌ 无效文件。",
+		"error.pull_verification_failed":
+			"❌ 拉取验证失败。远程仓库可能已被外部修改。请检查控制台或仓库中的错误。",
+
 		"merge.status": "合并中...",
 		"merge.compare": "对比本地/远程/上次同步...",
 		"msg.no_changes_conflicts": "没有需要发送的更改。⚠️ 已忽略 {n} 个冲突。",

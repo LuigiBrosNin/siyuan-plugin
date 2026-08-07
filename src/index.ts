@@ -27,7 +27,12 @@ import {
 	generateCommitMessage,
 } from "./utils";
 import { GitHubAPI } from "./github-api";
-import { getDeterministicSalt, deriveKeys, encryptFile, decryptFile } from "./crypto";
+import {
+	getDeterministicSalt,
+	deriveKeys,
+	encryptFile,
+	decryptFile,
+} from "./crypto";
 import {
 	siYuanGetFile,
 	siYuanPutFile,
@@ -92,26 +97,25 @@ export default class GitHubSyncPlugin extends Plugin {
 	private runtimeEncryptionPassword?: string;
 
 	private async deriveRepoKeys(): Promise<CryptoKey[] | null> {
-    if (!this.runtimeEncryptionPassword) return null;
-    try {
-        const username = this.config.username.trim();
-        const repo = this.config.repo.trim();
-        if (!username || !repo) {
-            console.error("[GitHub Sync] Username and repo must be set for deterministic salt derivation.");
-            return null;
-        }
+		if (!this.runtimeEncryptionPassword) return null;
+		try {
+			const username = this.config.username.trim();
+			const repo = this.config.repo.trim();
+			if (!username || !repo) {
+				console.error(
+					"[GitHub Sync] Username and repo must be set for deterministic salt derivation.",
+				);
+				return null;
+			}
 
-        // Generate static salt based on repo identity
-        const saltBase64 = await getDeterministicSalt(username, repo);
+			// Generate static salt based on repo identity
+			const saltBase64 = await getDeterministicSalt(username, repo);
 
-        return await deriveKeys(
-            this.runtimeEncryptionPassword,
-            saltBase64
-        );
-    } catch (e) {
-        console.error("[GitHub Sync] Key derivation failed:", e);
-        return null;
-    }
+			return await deriveKeys(this.runtimeEncryptionPassword, saltBase64);
+		} catch (e) {
+			console.error("[GitHub Sync] Key derivation failed:", e);
+			return null;
+		}
 	}
 
 	private async maybeEncrypt(content: ArrayBuffer): Promise<ArrayBuffer> {
@@ -231,6 +235,22 @@ export default class GitHubSyncPlugin extends Plugin {
 			this.config.token,
 			"password",
 		);
+
+		const t_Toggle = document.createElement("button");
+		t_Toggle.type = "button";
+		t_Toggle.className = "b3-button b3-button--outline";
+		t_Toggle.style.cssText = "margin-left:8px;padding:4px 8px;font-size:14px;";
+		t_Toggle.textContent = "👁️";
+		t_Toggle.onclick = () => {
+			if (tIn.type === "password") {
+				tIn.type = "text";
+				t_Toggle.textContent = "🙈";
+			} else {
+				tIn.type = "password";
+				t_Toggle.textContent = "👁️";
+			}
+		};
+
 		const gIn = this.mkInput(
 			t("setting.groq_key"),
 			this.config.groqKey,
@@ -275,11 +295,6 @@ export default class GitHubSyncPlugin extends Plugin {
 			}
 		};
 
-		const pWarn = document.createElement("div");
-		pWarn.style.cssText =
-			"font-size:12px;opacity:.8;margin-top:6px;color:var(--b3-theme-on-surface);";
-		pWarn.textContent = t("hint.encryption_password");
-
 		const eBtn = document.createElement("button");
 		eBtn.className = "b3-button b3-button--outline fn__block";
 		eBtn.textContent = t("button.export");
@@ -304,7 +319,7 @@ export default class GitHubSyncPlugin extends Plugin {
 				token: tIn.value.trim(),
 				groqKey: gIn.value.trim(),
 				showDiff: dIn.checked,
-				language: (this.config && this.config.language) || "fr",
+				language: (this.config && this.config.language) || "en",
 				encryptionSalt: this.config?.encryptionSalt || undefined,
 			};
 			if (pIn.value.trim()) cfg.encryptionPassword = pIn.value.trim();
@@ -365,6 +380,11 @@ export default class GitHubSyncPlugin extends Plugin {
 		passWrap.style.cssText = "display:flex;gap:8px;align-items:center;";
 		passWrap.appendChild(pIn);
 		passWrap.appendChild(pToggle);
+
+		const tokenWrap = document.createElement("div");
+		tokenWrap.style.cssText = "display:flex;gap:8px;align-items:center;";
+		tokenWrap.appendChild(tIn);
+		tokenWrap.appendChild(t_Toggle);
 
 		btnRow.appendChild(tBtn);
 		btnRow.appendChild(eBtn);
@@ -429,7 +449,11 @@ export default class GitHubSyncPlugin extends Plugin {
 		});
 		this.setting.addItem({
 			title: t("setting.github_token"),
-			createActionElement: () => tIn,
+			createActionElement: () => {
+				const wrap = document.createElement("div");
+				wrap.appendChild(tokenWrap);
+				return wrap;
+			},
 		});
 		this.setting.addItem({
 			title: t("setting.groq_key"),
@@ -441,7 +465,6 @@ export default class GitHubSyncPlugin extends Plugin {
 			createActionElement: () => {
 				const wrap = document.createElement("div");
 				wrap.appendChild(passWrap);
-				wrap.appendChild(pWarn);
 				return wrap;
 			},
 		});
@@ -1295,6 +1318,7 @@ export default class GitHubSyncPlugin extends Plugin {
 							await siYuanPutFile(siPath, decrypted);
 						} catch (decryptErr) {
 							console.error(`[DIAGNOSTIC] Failed to decrypt ${siPath}`);
+							throw new Error(t("error.pull_verification_failed"));
 						}
 					}
 				}
