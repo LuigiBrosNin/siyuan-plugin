@@ -27,7 +27,7 @@ import {
 	generateCommitMessage,
 } from "./utils";
 import { GitHubAPI } from "./github-api";
-import { deriveKeys, encryptFile, decryptFile } from "./crypto";
+import { getDeterministicSalt, deriveKeys, encryptFile, decryptFile } from "./crypto";
 import {
 	siYuanGetFile,
 	siYuanPutFile,
@@ -92,27 +92,26 @@ export default class GitHubSyncPlugin extends Plugin {
 	private runtimeEncryptionPassword?: string;
 
 	private async deriveRepoKeys(): Promise<CryptoKey[] | null> {
-		if (!this.runtimeEncryptionPassword) return null;
-		try {
-			if (!this.config.encryptionSalt) {
-				const rv = crypto.getRandomValues(new Uint8Array(16));
-				const saltB64 = btoa(
-					Array.from(rv)
-						.map((b) => String.fromCharCode(b))
-						.join(""),
-				);
-				this.config.encryptionSalt = saltB64;
-				await this.saveData(STORAGE_KEY, this.config);
-			}
-			// Use deriveKeys instead of deriveKey
-			return await deriveKeys(
-				this.runtimeEncryptionPassword,
-				this.config.encryptionSalt!,
-			);
-		} catch (e) {
-			console.error("[GitHub Sync] Key derivation failed:", e);
-			return null;
-		}
+    if (!this.runtimeEncryptionPassword) return null;
+    try {
+        const username = this.config.username.trim();
+        const repo = this.config.repo.trim();
+        if (!username || !repo) {
+            console.error("[GitHub Sync] Username and repo must be set for deterministic salt derivation.");
+            return null;
+        }
+
+        // Generate static salt based on repo identity
+        const saltBase64 = await getDeterministicSalt(username, repo);
+
+        return await deriveKeys(
+            this.runtimeEncryptionPassword,
+            saltBase64
+        );
+    } catch (e) {
+        console.error("[GitHub Sync] Key derivation failed:", e);
+        return null;
+    }
 	}
 
 	private async maybeEncrypt(content: ArrayBuffer): Promise<ArrayBuffer> {
@@ -276,30 +275,6 @@ export default class GitHubSyncPlugin extends Plugin {
 			}
 		};
 
-		const sIn = this.mkInput(
-			t("setting.encryption_salt"),
-			this.config.encryptionSalt || "",
-			"text",
-		);
-		sIn.title = "Base64-encoded per-repo salt used for key derivation";
-
-		pIn.oninput = async () => {
-			const val = pIn.value.trim();
-			this.runtimeEncryptionPassword = val || undefined;
-			this.config.encryptionPassword = val || undefined;
-			if (val && !this.config.encryptionSalt) {
-				const rv = crypto.getRandomValues(new Uint8Array(16));
-				this.config.encryptionSalt = btoa(
-					Array.from(rv)
-						.map((b) => String.fromCharCode(b))
-						.join(""),
-				);
-				try {
-					await this.saveData(STORAGE_KEY, this.config);
-				} catch (e) {}
-			}
-		};
-
 		const pWarn = document.createElement("div");
 		pWarn.style.cssText =
 			"font-size:12px;opacity:.8;margin-top:6px;color:var(--b3-theme-on-surface);";
@@ -368,10 +343,7 @@ export default class GitHubSyncPlugin extends Plugin {
 					gIn.value = data.groqKey || "";
 					dIn.checked = !!data.showDiff;
 					pIn.value = data.encryptionPassword || "";
-					if (data.encryptionSalt) {
-						this.config.encryptionSalt = data.encryptionSalt;
-						sIn.value = data.encryptionSalt;
-					}
+
 					this.runtimeEncryptionPassword = pIn.value.trim() || undefined;
 					if (data.language) {
 						try {
@@ -423,22 +395,7 @@ export default class GitHubSyncPlugin extends Plugin {
 					showDiff: dIn.checked,
 					language: this.config.language || "fr",
 					encryptionPassword: pIn.value.trim() || undefined,
-					encryptionSalt:
-						sIn && sIn.value.trim()
-							? sIn.value.trim()
-							: this.config.encryptionSalt,
 				};
-				if (pIn.value.trim()) {
-					this.runtimeEncryptionPassword = pIn.value.trim();
-					if (!this.config.encryptionSalt) {
-						const rv = crypto.getRandomValues(new Uint8Array(16));
-						this.config.encryptionSalt = btoa(
-							Array.from(rv)
-								.map((b) => String.fromCharCode(b))
-								.join(""),
-						);
-					}
-				}
 				await this.saveData(STORAGE_KEY, this.config);
 				showMessage(t("msg.saved"));
 			},
@@ -487,10 +444,6 @@ export default class GitHubSyncPlugin extends Plugin {
 				wrap.appendChild(pWarn);
 				return wrap;
 			},
-		});
-		this.setting.addItem({
-			title: t("setting.encryption_salt"),
-			createActionElement: () => sIn,
 		});
 
 		this.setting.addItem({
@@ -1288,29 +1241,6 @@ export default class GitHubSyncPlugin extends Plugin {
 				},
 			);
 
-			const manifestItem = remoteItems.find(
-				(i) => i.path === PLUGIN_MANIFEST_PATH,
-			);
-			if (manifestItem) {
-				const manifestContent = await api.downloadBlob(manifestItem.sha);
-				if (manifestContent) {
-					try {
-						const manifest = JSON.parse(
-							new TextDecoder().decode(manifestContent),
-						);
-						if (
-							manifest.encryptionSalt &&
-							manifest.encryptionSalt !== this.config.encryptionSalt
-						) {
-							this.config.encryptionSalt = manifest.encryptionSalt;
-							await this.saveData(STORAGE_KEY, this.config);
-						}
-					} catch (e) {
-						/* ignore */
-					}
-				}
-			}
-
 			for (let i = 0; i < remoteItems.length; i++) {
 				const item = remoteItems[i];
 
@@ -1417,25 +1347,6 @@ export default class GitHubSyncPlugin extends Plugin {
 				i.path.startsWith(SYNC_ROOT) &&
 				!i.path.startsWith("data/plugins/siyuan-github-sync/"),
 		);
-
-		const manifestItem = treeItems.find((i) => i.path === PLUGIN_MANIFEST_PATH);
-		if (manifestItem) {
-			const manifestContent = await api.downloadBlob(manifestItem.sha);
-			if (manifestContent) {
-				try {
-					const manifest = JSON.parse(
-						new TextDecoder().decode(manifestContent),
-					);
-					if (
-						manifest.encryptionSalt &&
-						manifest.encryptionSalt !== this.config.encryptionSalt
-					) {
-						this.config.encryptionSalt = manifest.encryptionSalt;
-						await this.saveData(STORAGE_KEY, this.config);
-					}
-				} catch (e) {}
-			}
-		}
 
 		let updated = 0;
 		for (const item of blobs) {

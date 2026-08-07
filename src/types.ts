@@ -35,7 +35,6 @@ export interface GitHubConfig {
 	showDiff: boolean;
 	language?: string;
 	lastSync?: number;
-	encryptionSalt?: string;
 	encryptionPassword?: string;
 }
 
@@ -45,7 +44,7 @@ export const DEFAULT_CONFIG: GitHubConfig = {
 	token: "",
 	groqKey: "",
 	showDiff: true,
-	language: "fr",
+	language: "en",
 };
 
 export interface SiYuanDirEntry {

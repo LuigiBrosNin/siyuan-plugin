@@ -132,6 +132,18 @@ export function isEncryptedBuffer(content: ArrayBuffer | Uint8Array): boolean {
 	return true;
 }
 
+// Generate a deterministic salt based on the username and repo name.
+// This ensures that the same salt is used for the same user/repo combination, allowing for consistent key derivation across sessions without storing the salt.
+// static salt is worse than random, but we have to use it to allow remote devices to connect with only password as the salt would be deterministic
+export async function getDeterministicSalt(username: string, repo: string): Promise<string> {
+    const encoder = new TextEncoder();
+    const data = encoder.encode(`siyuan-github-sync:${username}/${repo}`);
+    const hashBuffer = await crypto.subtle.digest("SHA-256", data);
+    // Take the first 16 bytes for a standard salt length and convert to base64
+    const saltBytes = new Uint8Array(hashBuffer).slice(0, 16);
+    return bytesToBase64(saltBytes);
+}
+
 export async function encryptFile(
 	content: ArrayBuffer,
 	key: CryptoKey,
