@@ -72,43 +72,31 @@ export function showDiffDialog(plan: MergePlan): Promise<boolean> {
     return new Promise(resolve => {
         const lines: string[] = [];
         if (plan.toUpload.length > 0) {
-            const locale = (window as any).__github_sync_locale || 'fr';
-            const filesLabel = locale === 'en' ? 'file(s) to send' : 'fichier(s) à envoyer';
-            const otherLabel = locale === 'en' ? 'other(s)' : 'autre(s)';
-            lines.push(`<div style="margin:6px 0;font-weight:bold;color:var(--b3-theme-primary);">🆕 ${plan.toUpload.length} ${filesLabel}</div>`);
+            lines.push(`<div style="margin:6px 0;font-weight:bold;color:var(--b3-theme-primary);">🆕 ${plan.toUpload.length} ${t('diff.files_to_upload')}</div>`);
             for (const u of plan.toUpload.slice(0, 20)) {
                 lines.push(`<div style="padding:2px 8px;font-size:12px;font-family:monospace;">+ ${u.githubPath}</div>`);
             }
-            if (plan.toUpload.length > 20) lines.push(`<div style="padding:2px 8px;font-size:11px;opacity:.6;">… et ${plan.toUpload.length - 20} ${otherLabel}</div>`);
+            if (plan.toUpload.length > 20) lines.push(`<div style="padding:2px 8px;font-size:11px;opacity:.6;">… et ${plan.toUpload.length - 20} ${t('diff.other')}</div>`);
         }
         if (plan.toDelete.length > 0) {
-                    const locale = (window as any).__github_sync_locale || 'fr';
-                    const filesLabel = locale === 'en' ? 'file(s) to remove' : 'fichier(s) à supprimer';
-                    const otherLabel = locale === 'en' ? 'other(s)' : 'autre(s)';
-                    lines.push(`<div style="margin:6px 0;font-weight:bold;color:#f44336;">🗑️ ${plan.toDelete.length} ${filesLabel}</div>`);
+                    lines.push(`<div style="margin:6px 0;font-weight:bold;color:#f44336;">🗑️ ${plan.toDelete.length} ${t('diff.files_to_delete')}</div>`);
                     for (const d of plan.toDelete.slice(0, 20)) {
                         lines.push(`<div style="padding:2px 8px;font-size:12px;font-family:monospace;">- ${d.githubPath}</div>`);
                     }
-                    if (plan.toDelete.length > 20) lines.push(`<div style="padding:2px 8px;font-size:11px;opacity:.6;">… et ${plan.toDelete.length - 20} ${otherLabel}</div>`);
+                    if (plan.toDelete.length > 20) lines.push(`<div style="padding:2px 8px;font-size:11px;opacity:.6;">… et ${plan.toDelete.length - 20} ${t('diff.other_files')}</div>`);
                 }
         if (plan.toReuse.length > 0) {
-            const locale = (window as any).__github_sync_locale || 'fr';
-            const unchangedLabel = locale === 'en' ? 'file(s) unchanged' : 'fichier(s) inchangé(s)';
-            lines.push(`<div style="margin:6px 0;font-weight:bold;color:#4caf50;">✅ ${plan.toReuse.length} ${unchangedLabel}</div>`);
+            lines.push(`<div style="margin:6px 0;font-weight:bold;color:#4caf50;">✅ ${plan.toReuse.length} ${t('diff.unchanged_files')}</div>`);
         }
         if (plan.conflicted.length > 0) {
-            const locale = (window as any).__github_sync_locale || 'fr';
-            const conflictText = locale === 'en' ? `⚠️ ${plan.conflicted.length} conflict(s) — modified on both sides, ignored` : `⚠️ ${plan.conflicted.length} conflit(s) — modifié des 2 côtés, ignoré`;
-            lines.push(`<div style="margin:6px 0;font-weight:bold;color:#ff9800;">${conflictText}</div>`);
+            lines.push(`<div style="margin:6px 0;font-weight:bold;color:#ff9800;">${t('diff.conflicts')}</div>`);
             for (const c of plan.conflicted.slice(0, 10)) {
                 lines.push(`<div style="padding:2px 8px;font-size:12px;font-family:monospace;">⚠ ${c.githubPath}</div>`);
             }
             if (plan.conflicted.length > 10) lines.push(`<div style="padding:2px 8px;font-size:11px;opacity:.6;">… et ${plan.conflicted.length - 10} autre(s)</div>`);
         }
         if (plan.skippedLarge > 0) {
-            const locale = (window as any).__github_sync_locale || 'fr';
-            const skippedLabel = locale === 'en' ? 'file(s) skipped' : 'fichier(s) ignoré(s)';
-            lines.push(`<div style="margin:6px 0;font-weight:bold;color:#9e9e9e;">📦 ${plan.skippedLarge} ${skippedLabel} (>25 Mo)</div>`);
+					lines.push(`<div style="margin:6px 0;font-weight:bold;color:#9e9e9e;">📦 ${plan.skippedLarge} ${t('diff.skipped_large')} (>25 Mo)</div>`);
         }
         const dialog = new Dialog({
             title: t('diff.title'),

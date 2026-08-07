@@ -1241,185 +1241,262 @@ export default class GitHubSyncPlugin extends Plugin {
 	}
 
 	private async pullFromGitHub() {
-        if (!this.config.token) return showMessage(t("msg.configure_plugin"));
-        this.activeTask = "pull";
-        this.lastProgress = { percent: 0, status: t("progress.analysis"), details: t("progress.reading_remote"), finished: false, error: false, message: "" };
-        this.showProgressUI("pull");
+		if (!this.config.token) return showMessage(t("msg.configure_plugin"));
+		this.activeTask = "pull";
+		this.lastProgress = {
+			percent: 0,
+			status: t("progress.analysis"),
+			details: t("progress.reading_remote"),
+			finished: false,
+			error: false,
+			message: "",
+		};
+		this.showProgressUI("pull");
 
-        try {
-            const api = new GitHubAPI(this.config.token, this.config.username, this.config.repo);
-            const repoInfo = await (await api.getRepoInfo()).json();
-            const branch = repoInfo.default_branch || "main";
-            const refRes = await api.getRef(branch);
+		try {
+			const api = new GitHubAPI(
+				this.config.token,
+				this.config.username,
+				this.config.repo,
+			);
+			const repoInfo = await (await api.getRepoInfo()).json();
+			const branch = repoInfo.default_branch || "main";
+			const refRes = await api.getRef(branch);
 
-            if (!refRes.ok) {
-                this.lastProgress = { ...this.lastProgress, finished: true, message: t("msg.repo_empty") };
-                if (this.currentUI) this.currentUI.finish(t("msg.repo_empty"));
-                return;
-            }
+			if (!refRes.ok) {
+				this.lastProgress = {
+					...this.lastProgress,
+					finished: true,
+					message: t("msg.repo_empty"),
+				};
+				if (this.currentUI) this.currentUI.finish(t("msg.repo_empty"));
+				return;
+			}
 
-            const refData = await refRes.json();
-            const lastCommit = await (await api.getCommit(refData.object.sha)).json();
-            const remoteItems = (await api.getRemoteTree(lastCommit.tree.sha)).filter((i) => {
-                if (i.type !== "blob") return false;
-                const p = i.path;
-                if (p.startsWith("data/")) {
-                    const rest = p.slice(5);
-                    const firstSegment = rest.split("/")[0];
-                    if (SKIP_ROOT_DIRS.includes(firstSegment)) return false;
-                }
-                return p.startsWith(SYNC_ROOT);
-            });
+			const refData = await refRes.json();
+			const lastCommit = await (await api.getCommit(refData.object.sha)).json();
+			const remoteItems = (await api.getRemoteTree(lastCommit.tree.sha)).filter(
+				(i) => {
+					if (i.type !== "blob") return false;
+					const p = i.path;
+					if (p.startsWith("data/")) {
+						const rest = p.slice(5);
+						const firstSegment = rest.split("/")[0];
+						if (SKIP_ROOT_DIRS.includes(firstSegment)) return false;
+					}
+					return p.startsWith(SYNC_ROOT);
+				},
+			);
 
-            const manifestItem = remoteItems.find((i) => i.path === PLUGIN_MANIFEST_PATH);
-            if (manifestItem) {
-                const manifestContent = await api.downloadBlob(manifestItem.sha);
-                if (manifestContent) {
-                    try {
-                        const manifest = JSON.parse(new TextDecoder().decode(manifestContent));
-                        if (manifest.encryptionSalt && manifest.encryptionSalt !== this.config.encryptionSalt) {
-                            this.config.encryptionSalt = manifest.encryptionSalt;
-                            await this.saveData(STORAGE_KEY, this.config);
-                        }
-                    } catch (e) { /* ignore */ }
-                }
-            }
+			const manifestItem = remoteItems.find(
+				(i) => i.path === PLUGIN_MANIFEST_PATH,
+			);
+			if (manifestItem) {
+				const manifestContent = await api.downloadBlob(manifestItem.sha);
+				if (manifestContent) {
+					try {
+						const manifest = JSON.parse(
+							new TextDecoder().decode(manifestContent),
+						);
+						if (
+							manifest.encryptionSalt &&
+							manifest.encryptionSalt !== this.config.encryptionSalt
+						) {
+							this.config.encryptionSalt = manifest.encryptionSalt;
+							await this.saveData(STORAGE_KEY, this.config);
+						}
+					} catch (e) {
+						/* ignore */
+					}
+				}
+			}
 
-            for (let i = 0; i < remoteItems.length; i++) {
-                const item = remoteItems[i];
-                let siPath = item.path.slice(SYNC_ROOT.length).replace(/^\//, "");
+			for (let i = 0; i < remoteItems.length; i++) {
+				const item = remoteItems[i];
 
-                if (item.path.startsWith(`${SYNC_ROOT}/enc/`)) {
-                    siPath = this.deobfuscateRemotePath(item.path).slice(SYNC_ROOT.length).replace(/^\//, "");
-                }
+				// Update progress for each file processed
+				this.updateProgress(
+					10 + Math.round((i / remoteItems.length) * 80),
+					`Pull : ${i + 1}/${remoteItems.length}`,
+					item.path,
+				);
 
-                if (LOCKED_EXTENSIONS.some((ext) => siPath.toLowerCase().endsWith(ext)) || siPath.includes("/temp/") || SKIP_PATH_FRAGMENTS.some((f) => siPath.includes(f))) {
-                    continue;
-                }
-                if (siPath.endsWith(".siyuan.sy")) { continue; }
+				let siPath = item.path.slice(SYNC_ROOT.length).replace(/^\//, "");
 
-                const localContent = await siYuanGetFile(siPath);
-                const localSha = localContent ? await calculateGitSha(localContent) : "";
+				if (item.path.startsWith(`${SYNC_ROOT}/enc/`)) {
+					siPath = this.deobfuscateRemotePath(item.path)
+						.slice(SYNC_ROOT.length)
+						.replace(/^\//, "");
+				}
 
-                if (localSha !== item.sha) {
-                    const content = await api.downloadBlob(item.sha);
-                    if (content && content.byteLength > 0) {
-                        try {
-                            const decrypted = await this.maybeDecrypt(content);
+				if (
+					LOCKED_EXTENSIONS.some((ext) => siPath.toLowerCase().endsWith(ext)) ||
+					siPath.includes("/temp/") ||
+					SKIP_PATH_FRAGMENTS.some((f) => siPath.includes(f))
+				) {
+					continue;
+				}
+				if (siPath.endsWith(".siyuan.sy")) {
+					continue;
+				}
 
-                            try {
-                                const text = new TextDecoder().decode(decrypted);
-                                console.log(`[DIAGNOSTIC] Path: ${siPath} | Valid Text?: YES | Preview: ${text.slice(0, 100)}...`);
-                            } catch (err) {
-                                console.error(`[DIAGNOSTIC] Path: ${siPath} | Valid Text?: NO (Binary or corrupted)`);
-                            }
+				const localContent = await siYuanGetFile(siPath);
+				const localSha = localContent
+					? await calculateGitSha(localContent)
+					: "";
 
-                            await siYuanPutFile(siPath, decrypted);
-                        } catch (decryptErr) {
-                            console.error(`[DIAGNOSTIC] Failed to decrypt ${siPath}`);
-                        }
-                    }
-                }
-                await sleep(30);
-            }
+				if (localSha !== item.sha) {
+					const content = await api.downloadBlob(item.sha);
+					if (content && content.byteLength > 0) {
+						try {
+							const decrypted = await this.maybeDecrypt(content);
 
-            try {
-                await processNotebookManifests(remoteItems, api, (buf) => this.maybeDecrypt(buf));
-            } catch { /* ignore */ }
+							try {
+								const text = new TextDecoder().decode(decrypted);
+								console.log(
+									`[DIAGNOSTIC] Path: ${siPath} | Valid Text?: YES | Preview: ${text.slice(0, 100)}...`,
+								);
+							} catch (err) {
+								console.error(
+									`[DIAGNOSTIC] Path: ${siPath} | Valid Text?: NO (Binary or corrupted)`,
+								);
+							}
 
-            console.warn("=================================================");
-            console.warn("[DIAGNOSTIC PAUSE] Pull completed. Reload is disabled.");
-            console.warn("1. Check the console logs above for '[DIAGNOSTIC]' lines.");
-            console.warn("2. Open your terminal and check the contents of your workspace /data/ folder.");
-            console.warn("3. 'cat' one of the newly pulled .sy files to verify its contents.");
-            console.warn("=================================================");
+							await siYuanPutFile(siPath, decrypted);
+						} catch (decryptErr) {
+							console.error(`[DIAGNOSTIC] Failed to decrypt ${siPath}`);
+						}
+					}
+				}
+				await sleep(30);
+			}
 
-            this.lastProgress = { ...this.lastProgress, finished: true, message: "Diagnostic pull complete. Check console." };
-            if (this.currentUI) this.currentUI.finish("Diagnostic pull complete. Check console.", false);
-            await this.saveSyncTimestamp();
+			try {
+				await processNotebookManifests(remoteItems, api, (buf) =>
+					this.maybeDecrypt(buf),
+				);
+			} catch {
+				/* ignore */
+			}
 
-        } catch (e) {
-            this.lastProgress = { ...this.lastProgress, finished: true, error: true, message: friendlyError(e) };
-            if (this.currentUI) this.currentUI.error(friendlyError(e));
-        } finally {
-            this.activeTask = null;
-        }
-    }
+			this.lastProgress = {
+				...this.lastProgress,
+				finished: true,
+				message: "Pull complete.",
+			};
+			if (this.currentUI) this.currentUI.finish("Pull complete.", true);
+			await this.saveSyncTimestamp();
+		} catch (e) {
+			this.lastProgress = {
+				...this.lastProgress,
+				finished: true,
+				error: true,
+				message: friendlyError(e),
+			};
+			if (this.currentUI) this.currentUI.error(friendlyError(e));
+		} finally {
+			this.activeTask = null;
+		}
+	}
 
 	async restoreCommit(sha: string, message: string) {
-        const api = new GitHubAPI(this.config.token, this.config.username, this.config.repo);
-        const commitRes = await api.getCommit(sha);
-        if (!commitRes.ok) throw new Error(t("error.cannot_fetch_commit") || "Cannot fetch commit");
+		const api = new GitHubAPI(
+			this.config.token,
+			this.config.username,
+			this.config.repo,
+		);
+		const commitRes = await api.getCommit(sha);
+		if (!commitRes.ok)
+			throw new Error(t("error.cannot_fetch_commit") || "Cannot fetch commit");
 
-        const commitData = await commitRes.json();
-        const treeItems = await api.getRemoteTree(commitData.tree.sha);
-        const blobs = treeItems.filter(
-            (i) => i.type === "blob" && i.path.startsWith(SYNC_ROOT) && !i.path.startsWith("data/plugins/siyuan-github-sync/"),
-        );
+		const commitData = await commitRes.json();
+		const treeItems = await api.getRemoteTree(commitData.tree.sha);
+		const blobs = treeItems.filter(
+			(i) =>
+				i.type === "blob" &&
+				i.path.startsWith(SYNC_ROOT) &&
+				!i.path.startsWith("data/plugins/siyuan-github-sync/"),
+		);
 
-        const manifestItem = treeItems.find((i) => i.path === PLUGIN_MANIFEST_PATH);
-        if (manifestItem) {
-            const manifestContent = await api.downloadBlob(manifestItem.sha);
-            if (manifestContent) {
-                try {
-                    const manifest = JSON.parse(new TextDecoder().decode(manifestContent));
-                    if (manifest.encryptionSalt && manifest.encryptionSalt !== this.config.encryptionSalt) {
-                        this.config.encryptionSalt = manifest.encryptionSalt;
-                        await this.saveData(STORAGE_KEY, this.config);
-                    }
-                } catch (e) {}
-            }
-        }
+		const manifestItem = treeItems.find((i) => i.path === PLUGIN_MANIFEST_PATH);
+		if (manifestItem) {
+			const manifestContent = await api.downloadBlob(manifestItem.sha);
+			if (manifestContent) {
+				try {
+					const manifest = JSON.parse(
+						new TextDecoder().decode(manifestContent),
+					);
+					if (
+						manifest.encryptionSalt &&
+						manifest.encryptionSalt !== this.config.encryptionSalt
+					) {
+						this.config.encryptionSalt = manifest.encryptionSalt;
+						await this.saveData(STORAGE_KEY, this.config);
+					}
+				} catch (e) {}
+			}
+		}
 
-        let updated = 0;
-        for (const item of blobs) {
-            let siPath = item.path.slice(SYNC_ROOT.length).replace(/^\//, "");
+		let updated = 0;
+		for (const item of blobs) {
+			let siPath = item.path.slice(SYNC_ROOT.length).replace(/^\//, "");
 
-            if (item.path.startsWith(`${SYNC_ROOT}/enc/`)) {
-                siPath = this.deobfuscateRemotePath(item.path).slice(SYNC_ROOT.length).replace(/^\//, "");
-            }
+			if (item.path.startsWith(`${SYNC_ROOT}/enc/`)) {
+				siPath = this.deobfuscateRemotePath(item.path)
+					.slice(SYNC_ROOT.length)
+					.replace(/^\//, "");
+			}
 
-            if (siPath.endsWith(`/${NOTEBOOK_MANIFEST_FILE}`)) {
-                continue;
-            }
+			if (siPath.endsWith(`/${NOTEBOOK_MANIFEST_FILE}`)) {
+				continue;
+			}
 
-            if (LOCKED_EXTENSIONS.some((ext) => siPath.toLowerCase().endsWith(ext)) || siPath.includes("/temp/") || SKIP_PATH_FRAGMENTS.some((f) => siPath.includes(f)) || siPath.endsWith(".siyuan.sy")) {
-                continue;
-            }
-            const writePath = siPath;
+			if (
+				LOCKED_EXTENSIONS.some((ext) => siPath.toLowerCase().endsWith(ext)) ||
+				siPath.includes("/temp/") ||
+				SKIP_PATH_FRAGMENTS.some((f) => siPath.includes(f)) ||
+				siPath.endsWith(".siyuan.sy")
+			) {
+				continue;
+			}
+			const writePath = siPath;
 
-            const content = await api.downloadBlob(item.sha);
-            if (content && content.byteLength > 0) {
-                try {
-                    const decrypted = await this.maybeDecrypt(content);
-                    await siYuanPutFile(writePath, decrypted);
-                    updated++;
-                } catch (e) {
-                    // Ignore and skip
-                }
-                await sleep(30);
-            }
-        }
-        await siYuanRefreshFiletree();
+			const content = await api.downloadBlob(item.sha);
+			if (content && content.byteLength > 0) {
+				try {
+					const decrypted = await this.maybeDecrypt(content);
+					await siYuanPutFile(writePath, decrypted);
+					updated++;
+				} catch (e) {
+					// Ignore and skip
+				}
+				await sleep(30);
+			}
+		}
+		await siYuanRefreshFiletree();
 
-        try {
-            await processNotebookManifests(treeItems, api, (buf) => this.maybeDecrypt(buf));
-        } catch { /* ignore */ }
+		try {
+			await processNotebookManifests(treeItems, api, (buf) =>
+				this.maybeDecrypt(buf),
+			);
+		} catch {
+			/* ignore */
+		}
 
-        const newFilesState: Record<string, string> = {};
-        treeItems.forEach((item) => {
-            if (item.type === "blob") newFilesState[item.path] = item.sha;
-        });
-        await this.saveSyncedState(sha, newFilesState);
+		const newFilesState: Record<string, string> = {};
+		treeItems.forEach((item) => {
+			if (item.type === "blob") newFilesState[item.path] = item.sha;
+		});
+		await this.saveSyncedState(sha, newFilesState);
 
-        showMessage(
-            t("msg.restored")
-                .replace("{n}", String(updated))
-                .replace("{sha}", sha.slice(0, 7))
-                .replace("{message}", message),
-        );
-        await this.saveSyncTimestamp();
-    }
+		showMessage(
+			t("msg.restored")
+				.replace("{n}", String(updated))
+				.replace("{sha}", sha.slice(0, 7))
+				.replace("{message}", message),
+		);
+		await this.saveSyncTimestamp();
+	}
 
 	private async handleHistoryClick() {
 		if (!this.config.token) return showMessage(t("msg.configure_plugin"));
