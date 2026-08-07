@@ -4,6 +4,7 @@ import {
 	FileToSync,
 	SKIP_ROOT_DIRS,
 	SKIP_PATH_FRAGMENTS,
+	LOCKED_EXTENSIONS,
 } from "./types";
 
 export async function siYuanReadDir(path: string): Promise<SiYuanDirEntry[]> {
@@ -281,11 +282,18 @@ export async function collectDir(
 ): Promise<FileToSync[]> {
 	const entries = await siYuanReadDir(siBase);
 	const files: FileToSync[] = [];
+
 	for (const e of entries) {
 		const sp = siBase === "/" ? `/${e.name}` : `${siBase}/${e.name}`;
 		const gp = ghBase ? `${ghBase}/${e.name}` : e.name;
+
 		if (SKIP_ROOT_DIRS.includes(e.name)) continue;
 		if (SKIP_PATH_FRAGMENTS.some((f) => sp.includes(f))) continue;
+
+		// Add this check to filter locked extensions
+		if (LOCKED_EXTENSIONS.some((ext) => e.name.toLowerCase().endsWith(ext)))
+			continue;
+
 		if (e.isDir) files.push(...(await collectDir(sp, gp)));
 		else files.push({ siYuanPath: sp, githubPath: gp });
 	}

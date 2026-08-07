@@ -83,17 +83,17 @@ export function showDiffDialog(plan: MergePlan): Promise<boolean> {
                     for (const d of plan.toDelete.slice(0, 20)) {
                         lines.push(`<div style="padding:2px 8px;font-size:12px;font-family:monospace;">- ${d.githubPath}</div>`);
                     }
-                    if (plan.toDelete.length > 20) lines.push(`<div style="padding:2px 8px;font-size:11px;opacity:.6;">… et ${plan.toDelete.length - 20} ${t('diff.other_files')}</div>`);
+                    if (plan.toDelete.length > 20) lines.push(`<div style="padding:2px 8px;font-size:11px;opacity:.6;">… et ${plan.toDelete.length - 20} ${t('diff.other')}</div>`);
                 }
         if (plan.toReuse.length > 0) {
-            lines.push(`<div style="margin:6px 0;font-weight:bold;color:#4caf50;">✅ ${plan.toReuse.length} ${t('diff.unchanged_files')}</div>`);
+            lines.push(`<div style="margin:6px 0;font-weight:bold;color:#4caf50;">✅ ${plan.toReuse.length} ${t('diff.unchanged')}</div>`);
         }
         if (plan.conflicted.length > 0) {
             lines.push(`<div style="margin:6px 0;font-weight:bold;color:#ff9800;">${t('diff.conflicts')}</div>`);
             for (const c of plan.conflicted.slice(0, 10)) {
                 lines.push(`<div style="padding:2px 8px;font-size:12px;font-family:monospace;">⚠ ${c.githubPath}</div>`);
             }
-            if (plan.conflicted.length > 10) lines.push(`<div style="padding:2px 8px;font-size:11px;opacity:.6;">… et ${plan.conflicted.length - 10} autre(s)</div>`);
+            if (plan.conflicted.length > 10) lines.push(`<div style="padding:2px 8px;font-size:11px;opacity:.6;">… ${t('part.and')} ${plan.conflicted.length - 10} ${t('part.other')}</div>`);
         }
         if (plan.skippedLarge > 0) {
 					lines.push(`<div style="margin:6px 0;font-weight:bold;color:#9e9e9e;">📦 ${plan.skippedLarge} ${t('diff.skipped_large')} (>25 Mo)</div>`);

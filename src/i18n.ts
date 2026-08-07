@@ -51,6 +51,7 @@ const locales: Record<string, LocaleMap> = {
 		"part.the": "le ",
 		"part.and": " et ",
 		"part.export_warning_suffix": " en clair.\nNe partagez pas ce fichier.",
+		"part.other": "autre",
 
 		"progress.analysis": "Analyse...",
 		"progress.reading_remote": "Lecture du dépôt distant...",
@@ -81,6 +82,7 @@ const locales: Record<string, LocaleMap> = {
 		"error.rate_limit":
 			"❌ Limite d'appels API GitHub atteinte. Réessaie dans 1 minute.",
 		"error.request_aborted": "❌ Requête annulée (timeout). Réessaie.",
+		"error.bad_password": "❌ Mot de passe de chiffrement invalide pour le dépôt distant.",
 		"error.file_too_large": "⚠️ Fichier trop volumineux (>25 Mo). Ignoré.",
 		"error.invalid_file": "❌ Fichier invalide.",
 		"error.pull_verification_failed":
@@ -174,6 +176,8 @@ const locales: Record<string, LocaleMap> = {
 		"part.the": "the ",
 		"part.and": " and ",
 		"part.export_warning_suffix": " in cleartext.\nDo not share this file.",
+		"part.other": "other",
+
 		"progress.analysis": "Analysis...",
 		"progress.reading_remote": "Reading remote repository...",
 
@@ -202,6 +206,7 @@ const locales: Record<string, LocaleMap> = {
 		"error.rate_limit":
 			"❌ GitHub API rate limit reached. Try again in 1 minute.",
 		"error.request_aborted": "❌ Request aborted (timeout). Try again.",
+		"error.bad_password": "❌ Invalid encryption password for remote repository.",
 		"error.file_too_large": "⚠️ File too large (>25 MB). Ignored.",
 		"error.invalid_file": "❌ Invalid file.",
 		"error.pull_verification_failed": "❌ Pull verification failed. The remote repository may have been modified outside of this plugin. Please check errors in the console or the repository",
@@ -280,6 +285,7 @@ const locales: Record<string, LocaleMap> = {
 		"part.the": "",
 		"part.and": " 和 ",
 		"part.export_warning_suffix": " 的明文。\n请勿分享此文件。",
+		"part.other": "其他",
 		"progress.analysis": "分析中...",
 		"progress.reading_remote": "读取远程仓库...",
 
@@ -304,6 +310,7 @@ const locales: Record<string, LocaleMap> = {
 		"error.no_internet": "❌ 无网络连接。",
 		"error.rate_limit": "❌ 达到 GitHub API 速率限制。请稍后重试。",
 		"error.request_aborted": "❌ 请求被中止 (超时)。",
+		"error.bad_password": "❌ 远程仓库的加密密码无效。",
 		"error.file_too_large": "⚠️ 文件过大 (>25 MB)，已跳过。",
 		"error.invalid_file": "❌ 无效文件。",
 		"error.pull_verification_failed":

@@ -8,7 +8,7 @@ export const SKIP_ROOT_DIRS = [
 	"conf",
 	".siyuan",
 	"!storage/av",
-	"storage/*",
+	"storage",
 	"emojis",
 	"public",
 	"templates",

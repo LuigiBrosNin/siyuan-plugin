@@ -32,6 +32,7 @@ import {
 	deriveKeys,
 	encryptFile,
 	decryptFile,
+	isEncryptedBuffer,
 } from "./crypto";
 import {
 	siYuanGetFile,
@@ -56,7 +57,7 @@ import { t, setLocale, availableLocales, getLocale, langs } from "./i18n";
 
 export default class GitHubSyncPlugin extends Plugin {
 	private obfuscateRemotePath(originalPath: string): string {
-		if (!this.runtimeEncryptionPassword) return originalPath;
+		if (!this.config.encryptionPassword) return originalPath;
 		if (
 			originalPath === PLUGIN_MANIFEST_PATH ||
 			originalPath === WIDGET_MANIFEST_PATH ||
@@ -94,28 +95,42 @@ export default class GitHubSyncPlugin extends Plugin {
 		message: "",
 	};
 	private statusBarEl: HTMLElement | null = null;
-	private runtimeEncryptionPassword?: string;
+
+	// Add this variable directly above the method
+	private keysCache: { password?: string; promise: Promise<CryptoKey[] | null> } | null = null;
 
 	private async deriveRepoKeys(): Promise<CryptoKey[] | null> {
-		if (!this.runtimeEncryptionPassword) return null;
-		try {
-			const username = this.config.username.trim();
-			const repo = this.config.repo.trim();
-			if (!username || !repo) {
-				console.error(
-					"[GitHub Sync] Username and repo must be set for deterministic salt derivation.",
-				);
-				return null;
-			}
+    if (!this.config.encryptionPassword) return null;
 
-			// Generate static salt based on repo identity
-			const saltBase64 = await getDeterministicSalt(username, repo);
+    // Return the cached promise if the password hasn't changed
+    if (this.keysCache?.password === this.config.encryptionPassword) {
+        return this.keysCache.promise;
+    }
 
-			return await deriveKeys(this.runtimeEncryptionPassword, saltBase64);
-		} catch (e) {
-			console.error("[GitHub Sync] Key derivation failed:", e);
-			return null;
-		}
+    // Wrap the derivation in a single Promise to handle concurrent calls safely
+    const promise = (async () => {
+        try {
+            const username = this.config.username.trim();
+            const repo = this.config.repo.trim();
+            if (!username || !repo) {
+                console.error(
+                    "[GitHub Sync] Username and repo must be set for deterministic salt derivation.",
+                );
+                return null;
+            }
+
+            // Generate static salt based on repo identity
+            const saltBase64 = await getDeterministicSalt(username, repo);
+            return await deriveKeys(this.config.encryptionPassword, saltBase64);
+        } catch (e) {
+            console.error("[GitHub Sync] Key derivation failed:", e);
+            return null;
+        }
+    })();
+
+    // Cache the promise alongside the password used to generate it
+    this.keysCache = { password: this.config.encryptionPassword, promise };
+    return promise;
 	}
 
 	private async maybeEncrypt(content: ArrayBuffer): Promise<ArrayBuffer> {
@@ -152,10 +167,8 @@ export default class GitHubSyncPlugin extends Plugin {
 		const saved = await this.loadData(STORAGE_KEY);
 		if (saved) {
 			this.config = { ...DEFAULT_CONFIG, ...saved };
-			this.runtimeEncryptionPassword =
-				this.config.encryptionPassword || undefined;
 			try {
-				setLocale(this.config.language ?? "fr");
+				setLocale(this.config.language ?? "en");
 				(window as any).__github_sync_locale = getLocale();
 			} catch {}
 		}
@@ -320,7 +333,6 @@ export default class GitHubSyncPlugin extends Plugin {
 				groqKey: gIn.value.trim(),
 				showDiff: dIn.checked,
 				language: (this.config && this.config.language) || "en",
-				encryptionSalt: this.config?.encryptionSalt || undefined,
 			};
 			if (pIn.value.trim()) cfg.encryptionPassword = pIn.value.trim();
 
@@ -359,7 +371,6 @@ export default class GitHubSyncPlugin extends Plugin {
 					dIn.checked = !!data.showDiff;
 					pIn.value = data.encryptionPassword || "";
 
-					this.runtimeEncryptionPassword = pIn.value.trim() || undefined;
 					if (data.language) {
 						try {
 							setLocale(data.language);
@@ -394,7 +405,6 @@ export default class GitHubSyncPlugin extends Plugin {
 		forgetBtn.className = "b3-button b3-button--outline fn__block";
 		forgetBtn.textContent = t("button.forget_password");
 		forgetBtn.onclick = () => {
-			this.runtimeEncryptionPassword = undefined;
 			pIn.value = "";
 			this.config.encryptionPassword = undefined;
 			try {
@@ -413,7 +423,7 @@ export default class GitHubSyncPlugin extends Plugin {
 					token: tIn.value.trim(),
 					groqKey: gIn.value.trim(),
 					showDiff: dIn.checked,
-					language: this.config.language || "fr",
+					language: this.config.language || "en",
 					encryptionPassword: pIn.value.trim() || undefined,
 				};
 				await this.saveData(STORAGE_KEY, this.config);
@@ -611,17 +621,26 @@ export default class GitHubSyncPlugin extends Plugin {
 			}
 			const localSha = await calculateGitSha(content);
 			const remoteSha = remoteMap.get(f.githubPath);
-			const syncedSha = syncedFiles[f.githubPath];
+			const syncedRaw = syncedFiles[f.githubPath];
+
+			let localSynced = syncedRaw;
+			let remoteSynced = syncedRaw;
+			if (syncedRaw && syncedRaw.includes(":")) {
+				const parts = syncedRaw.split(":");
+				localSynced = parts[0];
+				remoteSynced = parts[1];
+			}
 
 			if (localSha === remoteSha) {
 				plan.toReuse.push({ githubPath: f.githubPath, sha: remoteSha });
-			} else if (!remoteSha) {
+			} else if (!remoteSha || !syncedRaw) {
+				// Force upload to repair missing state and break the ghost conflict loop
 				plan.toUpload.push({
 					githubPath: f.githubPath,
 					siYuanPath: f.siYuanPath,
 				});
-			} else if (!syncedSha || localSha !== syncedSha) {
-				if (remoteSha !== syncedSha)
+			} else if (localSha !== localSynced) {
+				if (remoteSha !== remoteSynced)
 					plan.conflicted.push({
 						githubPath: f.githubPath,
 						siYuanPath: f.siYuanPath,
@@ -631,12 +650,15 @@ export default class GitHubSyncPlugin extends Plugin {
 						githubPath: f.githubPath,
 						siYuanPath: f.siYuanPath,
 					});
-			} else {
+			} else if (remoteSha !== remoteSynced) {
 				plan.toPull.push({
 					githubPath: f.githubPath,
 					siYuanPath: f.siYuanPath,
 				});
+			} else {
+				plan.toReuse.push({ githubPath: f.githubPath, sha: remoteSha });
 			}
+
 			processed++;
 			this.updateProgress(
 				5 + Math.round((processed / localFiles.length) * 70),
@@ -646,9 +668,26 @@ export default class GitHubSyncPlugin extends Plugin {
 			if (processed % 5 === 0) await sleep(20);
 		}
 
+		const manifestPathSet = new Set([
+			PLUGIN_MANIFEST_PATH,
+			WIDGET_MANIFEST_PATH,
+			THEME_MANIFEST_PATH,
+		]);
+
 		for (const [path] of remoteMap) {
-			if (path.startsWith(SYNC_ROOT) && !localPathSet.has(path))
-				plan.toDelete.push({ githubPath: path });
+			if (
+				path.startsWith(SYNC_ROOT) &&
+				!localPathSet.has(path) &&
+				!manifestPathSet.has(path) &&
+				!path.endsWith(`/${NOTEBOOK_MANIFEST_FILE}`)
+			) {
+				// Use the state ledger to differentiate between a local deletion and a new remote file
+				if (syncedFiles[path]) {
+					plan.toDelete.push({ githubPath: path });
+				} else {
+					plan.toPull.push({ githubPath: path, siYuanPath: `/${path}` });
+				}
+			}
 		}
 		plan.skippedLarge = skippedLarge;
 		return plan;
@@ -673,7 +712,7 @@ export default class GitHubSyncPlugin extends Plugin {
 				this.config.username,
 				this.config.repo,
 			);
-			const localFiles = await collectDir("/", SYNC_ROOT);
+			const localFiles = await collectDir(`/${SYNC_ROOT}`, SYNC_ROOT);
 			const pluginManifest = await generatePluginManifest();
 			const manifestSha = await calculateGitSha(pluginManifest.content);
 			const widgetManifest = await generateWidgetManifest();
@@ -693,6 +732,26 @@ export default class GitHubSyncPlugin extends Plugin {
 				lastCommitSha = refData.object.sha;
 				const lastCommit = await (await api.getCommit(lastCommitSha)).json();
 				const remoteTree = await api.getRemoteTree(lastCommit.tree.sha);
+
+				// --- verification block ---
+				const verifyNode = remoteTree.find(
+					(i: any) =>
+						i.type === "blob" &&
+						(i.path.endsWith(`/${NOTEBOOK_MANIFEST_FILE}`) ||
+							i.path.includes("/enc/")),
+				);
+				if (verifyNode) {
+					const testBlob = await api.downloadBlob(verifyNode.sha);
+					if (testBlob && isEncryptedBuffer(testBlob)) {
+						try {
+							await this.maybeDecrypt(testBlob);
+						} catch (e) {
+							throw new Error(t("error.bad_password"));
+						}
+					}
+				}
+				// -----------------------------------
+
 				remoteTree.forEach((item) => {
 					if (item.type === "blob") {
 						const orig = this.deobfuscateRemotePath(item.path);
@@ -832,6 +891,11 @@ export default class GitHubSyncPlugin extends Plugin {
 				const blobRes = await api.createBlob(
 					arrayBufferToBase64(await this.maybeEncrypt(content)),
 				);
+
+				console.log(
+					`[DEBUG] File Blob - path: ${u.githubPath}, ok: ${blobRes.ok}, bodyUsed: ${blobRes.bodyUsed}`,
+				);
+
 				if (!blobRes.ok) {
 					console.error(
 						`[GitHub Sync] Blob failed for ${u.githubPath}:`,
@@ -871,30 +935,22 @@ export default class GitHubSyncPlugin extends Plugin {
 				t("progress.upload_plugin_manifest"),
 				PLUGIN_MANIFEST_PATH,
 			);
-			try {
-				const manifestText = new TextDecoder().decode(pluginManifest.content);
-				const manifestJson = JSON.parse(manifestText);
-				manifestJson.encryptionSalt = this.config.encryptionSalt || null;
-				const manifestWithSaltBuf = new TextEncoder().encode(
-					JSON.stringify(manifestJson, null, 2),
-				).buffer;
-				const manifestBlobRes = await api.createBlob(
-					arrayBufferToBase64(manifestWithSaltBuf),
-				);
-				if (manifestBlobRes.ok) {
-					const manifestBlobData = await manifestBlobRes.json();
-					treeItems.push({
-						path: PLUGIN_MANIFEST_PATH,
-						mode: "100644",
-						type: "blob",
-						sha: manifestBlobData.sha,
-					});
-				}
-			} catch (e) {
-				console.error(
-					"[GitHub Sync] Failed to attach encryptionSalt to plugin manifest:",
-					e,
-				);
+			const manifestBlobRes = await api.createBlob(
+				arrayBufferToBase64(pluginManifest.content),
+			);
+
+			console.log(
+				`[DEBUG] Plugin Manifest Blob - ok: ${manifestBlobRes.ok}, bodyUsed: ${manifestBlobRes.bodyUsed}`,
+			);
+
+			if (manifestBlobRes.ok) {
+				const pluginManifestBlobData = await manifestBlobRes.json();
+				treeItems.push({
+					path: PLUGIN_MANIFEST_PATH,
+					mode: "100644",
+					type: "blob",
+					sha: pluginManifestBlobData.sha,
+				});
 			}
 
 			this.updateProgress(
@@ -968,6 +1024,11 @@ export default class GitHubSyncPlugin extends Plugin {
 			for (let i = 0; i < treeItems.length; i += CHUNK_SIZE) {
 				const chunk = treeItems.slice(i, i + CHUNK_SIZE);
 				const treeRes = await api.createTree(currentTreeSha, chunk);
+
+				console.log(
+					`[DEBUG] Tree Creation - ok: ${treeRes.ok}, bodyUsed: ${treeRes.bodyUsed}`,
+				);
+
 				if (!treeRes.ok) {
 					const errText = await treeRes.text();
 					throw new Error(
@@ -989,6 +1050,11 @@ export default class GitHubSyncPlugin extends Plugin {
 			const commitRes = await api.createCommit(commitMsg, currentTreeSha, [
 				lastCommitSha,
 			]);
+
+			console.log(
+				`[DEBUG] Commit Creation - ok: ${commitRes.ok}, bodyUsed: ${commitRes.bodyUsed}`,
+			);
+
 			if (!commitRes.ok) {
 				const errText = await commitRes.text();
 				throw new Error(
@@ -1005,11 +1071,24 @@ export default class GitHubSyncPlugin extends Plugin {
 				);
 			}
 
+			const oldState = await this.loadSyncedState();
+			const oldSyncedFiles = oldState?.files || {};
+
 			const newFilesState: Record<string, string> = {};
-			for (const r of plan.toReuse) newFilesState[r.githubPath] = r.sha;
+			for (const r of plan.toReuse) {
+				newFilesState[r.githubPath] = oldSyncedFiles[r.githubPath] || r.sha;
+			}
 			for (const u of plan.toUpload) {
-				const uploadedSha = treeItems.find((t) => t.path === u.githubPath)?.sha;
-				if (uploadedSha) newFilesState[u.githubPath] = uploadedSha;
+				const expectedPath = manifestPathSet.has(u.githubPath)
+					? u.githubPath
+					: this.obfuscateRemotePath(u.githubPath);
+
+				const uploadedSha = treeItems.find((t) => t.path === expectedPath)?.sha;
+				if (uploadedSha) {
+					const content = await siYuanGetFile(u.siYuanPath);
+					const ptSha = content ? await calculateGitSha(content) : uploadedSha;
+					newFilesState[u.githubPath] = `${ptSha}:${uploadedSha}`;
+				}
 			}
 			await this.saveSyncedState(commitData.sha, newFilesState);
 
@@ -1085,6 +1164,7 @@ export default class GitHubSyncPlugin extends Plugin {
 			const blobRes = await api.createBlob(
 				arrayBufferToBase64(await this.maybeEncrypt(content)),
 			);
+
 			if (blobRes.ok) {
 				const blobData = await blobRes.json();
 				const remotePath = manifestPathSet.has(u.githubPath)
@@ -1104,16 +1184,6 @@ export default class GitHubSyncPlugin extends Plugin {
 
 		for (const m of [pluginManifest, widgetManifest, themeManifest]) {
 			let content = m.content;
-			if (m === pluginManifest) {
-				try {
-					const manifestText = new TextDecoder().decode(m.content);
-					const manifestJson = JSON.parse(manifestText);
-					manifestJson.encryptionSalt = this.config.encryptionSalt || null;
-					content = new TextEncoder().encode(
-						JSON.stringify(manifestJson, null, 2),
-					).buffer;
-				} catch (e) {}
-			}
 			const mRes = await api.createBlob(arrayBufferToBase64(content));
 			if (mRes.ok) {
 				const mData = await mRes.json();
@@ -1201,7 +1271,8 @@ export default class GitHubSyncPlugin extends Plugin {
 
 			const newFilesState: Record<string, string> = {};
 			treeItems.forEach((item) => {
-				newFilesState[item.path] = item.sha;
+				const originalPath = this.deobfuscateRemotePath(item.path);
+				newFilesState[originalPath] = item.sha;
 			});
 			await this.saveSyncedState(commitData.sha, newFilesState);
 		}
@@ -1217,8 +1288,9 @@ export default class GitHubSyncPlugin extends Plugin {
 	}
 
 	private async pullFromGitHub() {
-		if (!this.config.token) return showMessage(t("msg.configure_plugin"));
+		if (!this.config.token) return showMessage(t("msg.configure_plugin")); //[cite: 2]
 		this.activeTask = "pull";
+
 		this.lastProgress = {
 			percent: 0,
 			status: t("progress.analysis"),
@@ -1235,10 +1307,11 @@ export default class GitHubSyncPlugin extends Plugin {
 				this.config.username,
 				this.config.repo,
 			);
+
 			const repoInfo = await (await api.getRepoInfo()).json();
 			const branch = repoInfo.default_branch || "main";
-			const refRes = await api.getRef(branch);
 
+			const refRes = await api.getRef(branch);
 			if (!refRes.ok) {
 				this.lastProgress = {
 					...this.lastProgress,
@@ -1251,6 +1324,7 @@ export default class GitHubSyncPlugin extends Plugin {
 
 			const refData = await refRes.json();
 			const lastCommit = await (await api.getCommit(refData.object.sha)).json();
+
 			const remoteItems = (await api.getRemoteTree(lastCommit.tree.sha)).filter(
 				(i) => {
 					if (i.type !== "blob") return false;
@@ -1264,23 +1338,24 @@ export default class GitHubSyncPlugin extends Plugin {
 				},
 			);
 
+			// 1. Load the synced state
+			const syncedState = await this.loadSyncedState();
+			const syncedFiles = syncedState?.files || {};
+			let stateUpdated = false;
+
+			// Batch optimizer
+			// 1. Pre-filter files to find exactly what needs downloading (Runs instantly in memory)
+			const toPull = [];
 			for (let i = 0; i < remoteItems.length; i++) {
 				const item = remoteItems[i];
 
-				// Update progress for each file processed
-				this.updateProgress(
-					10 + Math.round((i / remoteItems.length) * 80),
-					`Pull : ${i + 1}/${remoteItems.length}`,
-					item.path,
-				);
-
-				let siPath = item.path.slice(SYNC_ROOT.length).replace(/^\//, "");
-
+				// Extract the plaintext path to ensure state ledger parity
+				let originalPath = item.path;
 				if (item.path.startsWith(`${SYNC_ROOT}/enc/`)) {
-					siPath = this.deobfuscateRemotePath(item.path)
-						.slice(SYNC_ROOT.length)
-						.replace(/^\//, "");
+					originalPath = this.deobfuscateRemotePath(item.path);
 				}
+
+				let siPath = `/${originalPath}`;
 
 				if (
 					LOCKED_EXTENSIONS.some((ext) => siPath.toLowerCase().endsWith(ext)) ||
@@ -1289,39 +1364,58 @@ export default class GitHubSyncPlugin extends Plugin {
 				) {
 					continue;
 				}
+
 				if (siPath.endsWith(".siyuan.sy")) {
 					continue;
 				}
 
-				const localContent = await siYuanGetFile(siPath);
-				const localSha = localContent
-					? await calculateGitSha(localContent)
-					: "";
+				// Lookup state using the plaintext originalPath
+				const knownRaw = syncedFiles[originalPath];
+				const remoteSynced =
+					knownRaw && knownRaw.includes(":")
+						? knownRaw.split(":")[1]
+						: knownRaw;
 
-				if (localSha !== item.sha) {
-					const content = await api.downloadBlob(item.sha);
-					if (content && content.byteLength > 0) {
-						try {
-							const decrypted = await this.maybeDecrypt(content);
-
-							try {
-								const text = new TextDecoder().decode(decrypted);
-								console.log(
-									`[DIAGNOSTIC] Path: ${siPath} | Valid Text?: YES | Preview: ${text.slice(0, 100)}...`,
-								);
-							} catch (err) {
-								console.error(
-									`[DIAGNOSTIC] Path: ${siPath} | Valid Text?: NO (Binary or corrupted)`,
-								);
-							}
-
-							await siYuanPutFile(siPath, decrypted);
-						} catch (decryptErr) {
-							console.error(`[DIAGNOSTIC] Failed to decrypt ${siPath}`);
-							throw new Error(t("error.pull_verification_failed"));
-						}
-					}
+				if (remoteSynced !== item.sha) {
+					toPull.push({ item, siPath, originalPath });
 				}
+			}
+
+			// 2. Download and write the changed files concurrently in batches
+			const CHUNK_SIZE = 5;
+
+			for (let i = 0; i < toPull.length; i += CHUNK_SIZE) {
+				const chunk = toPull.slice(i, i + CHUNK_SIZE);
+
+				this.updateProgress(
+					10 + Math.round((i / toPull.length) * 80),
+					`Pull : ${i + chunk.length}/${toPull.length} files`,
+					chunk
+						.map((c) => c.originalPath)
+						.join(", ")
+						.slice(0, 50) + "...",
+				);
+
+				await Promise.all(
+					chunk.map(async ({ item, siPath, originalPath }) => {
+						const content = await api.downloadBlob(item.sha);
+						if (content && content.byteLength > 0) {
+							try {
+								const decrypted = await this.maybeDecrypt(content);
+								await siYuanPutFile(siPath, decrypted);
+
+								const ptSha = await calculateGitSha(decrypted);
+								// Save state using the plaintext originalPath
+								syncedFiles[originalPath] = `${ptSha}:${item.sha}`;
+								stateUpdated = true;
+							} catch (decryptErr) {
+								console.error(`[DIAGNOSTIC] Failed to decrypt ${siPath}`);
+								throw new Error(t("error.pull_verification_failed"));
+							}
+						}
+					}),
+				);
+
 				await sleep(30);
 			}
 
@@ -1331,6 +1425,11 @@ export default class GitHubSyncPlugin extends Plugin {
 				);
 			} catch {
 				/* ignore */
+			}
+
+			// 3. Save the updated state mapping if files were modified[cite: 2]
+			if (stateUpdated) {
+				await this.saveSyncedState(lastCommit.sha, syncedFiles);
 			}
 
 			this.lastProgress = {
@@ -1374,12 +1473,9 @@ export default class GitHubSyncPlugin extends Plugin {
 
 		let updated = 0;
 		for (const item of blobs) {
-			let siPath = item.path.slice(SYNC_ROOT.length).replace(/^\//, "");
-
+			let siPath = `/${item.path}`;
 			if (item.path.startsWith(`${SYNC_ROOT}/enc/`)) {
-				siPath = this.deobfuscateRemotePath(item.path)
-					.slice(SYNC_ROOT.length)
-					.replace(/^\//, "");
+				siPath = `/${this.deobfuscateRemotePath(item.path)}`;
 			}
 
 			if (siPath.endsWith(`/${NOTEBOOK_MANIFEST_FILE}`)) {
