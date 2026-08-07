@@ -16,17 +16,18 @@ import {
 	PLUGIN_MANIFEST_PATH,
 	WIDGET_MANIFEST_PATH,
 	THEME_MANIFEST_PATH,
+	NOTEBOOK_MANIFEST_FILE,
 } from "./types";
 import {
 	calculateGitSha,
 	sleep,
 	arrayBufferToBase64,
-	encodePath,
 	friendlyError,
 	extractTextFromSyFile,
 	generateCommitMessage,
 } from "./utils";
 import { GitHubAPI } from "./github-api";
+import { deriveKeys, encryptFile, decryptFile } from "./crypto";
 import {
 	siYuanGetFile,
 	siYuanPutFile,
@@ -49,6 +50,33 @@ import { HistoryDialog } from "./history";
 import { t, setLocale, availableLocales, getLocale, langs } from "./i18n";
 
 export default class GitHubSyncPlugin extends Plugin {
+	private obfuscateRemotePath(originalPath: string): string {
+		if (!this.runtimeEncryptionPassword) return originalPath;
+		if (
+			originalPath === PLUGIN_MANIFEST_PATH ||
+			originalPath === WIDGET_MANIFEST_PATH ||
+			originalPath === THEME_MANIFEST_PATH ||
+			originalPath.endsWith("/" + NOTEBOOK_MANIFEST_FILE) ||
+			originalPath.startsWith(SYNC_ROOT + "/manifests")
+		)
+			return originalPath;
+		const encoded = btoa(encodeURIComponent(originalPath));
+		return `${SYNC_ROOT}/enc/${encoded}`;
+	}
+
+	private deobfuscateRemotePath(remotePath: string): string {
+		const prefix = `${SYNC_ROOT}/enc/`;
+		if (remotePath.startsWith(prefix)) {
+			const b64 = remotePath.slice(prefix.length);
+			try {
+				return decodeURIComponent(atob(b64));
+			} catch {
+				return remotePath;
+			}
+		}
+		return remotePath;
+	}
+
 	private config: GitHubConfig = { ...DEFAULT_CONFIG };
 	private activeTask: "push" | "pull" | null = null;
 	private currentUI: SyncProgressUI | null = null;
@@ -61,18 +89,73 @@ export default class GitHubSyncPlugin extends Plugin {
 		message: "",
 	};
 	private statusBarEl: HTMLElement | null = null;
+	private runtimeEncryptionPassword?: string;
+
+	private async deriveRepoKeys(): Promise<CryptoKey[] | null> {
+		if (!this.runtimeEncryptionPassword) return null;
+		try {
+			if (!this.config.encryptionSalt) {
+				const rv = crypto.getRandomValues(new Uint8Array(16));
+				const saltB64 = btoa(
+					Array.from(rv)
+						.map((b) => String.fromCharCode(b))
+						.join(""),
+				);
+				this.config.encryptionSalt = saltB64;
+				await this.saveData(STORAGE_KEY, this.config);
+			}
+			// Use deriveKeys instead of deriveKey
+			return await deriveKeys(
+				this.runtimeEncryptionPassword,
+				this.config.encryptionSalt!,
+			);
+		} catch (e) {
+			console.error("[GitHub Sync] Key derivation failed:", e);
+			return null;
+		}
+	}
+
+	private async maybeEncrypt(content: ArrayBuffer): Promise<ArrayBuffer> {
+		const keys = await this.deriveRepoKeys();
+		if (!keys || keys.length === 0) return content;
+		// Always encrypt with the first (strongest) successfully generated key
+		return encryptFile(content, keys[0]);
+	}
+
+	private async maybeDecrypt(content: ArrayBuffer): Promise<ArrayBuffer> {
+		const keys = await this.deriveRepoKeys();
+		const snippet = Array.from(new Uint8Array(content).slice(0, 12))
+			.map((b) => b.toString(16).padStart(2, "0"))
+			.join(" ");
+		if (!keys || keys.length === 0) return content;
+		try {
+			if (!(await import("./crypto")).isEncryptedBuffer(content))
+				return content;
+			// Pass the entire array of keys to be tested sequentially
+			return await (await import("./crypto")).decryptFile(content, keys);
+		} catch (e) {
+			const msg = e instanceof Error ? e.message : String(e);
+			console.error(
+				`[GitHub Sync] maybeDecrypt failed: ${msg}. firstBytes=${snippet}`,
+			);
+			throw new Error(`Decryption failed: Verify your password. (${msg})`);
+		}
+	}
 
 	async onload() {
 		this.addIcons(
 			`<symbol id="iconGitHubUpload" viewBox="0 0 24 24"><path fill="currentColor" d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 13v-4H8l4-4 4 4h-3v4h-2z"/></symbol><symbol id="iconGitHubDownload" viewBox="0 0 24 24"><path fill="currentColor" d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 7v4h3l-4 4-4-4h3V9h2z"/></symbol><symbol id="iconGitHistory" viewBox="0 0 24 24"><path fill="currentColor" d="M13 3a9 9 0 0 0-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42A8.954 8.954 0 0 0 13 21a9 9 0 0 0 0-18zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z"/></symbol>`,
 		);
 		const saved = await this.loadData(STORAGE_KEY);
-		if (saved) this.config = { ...DEFAULT_CONFIG, ...saved };
-		// apply saved locale
-		try {
-			setLocale(this.config.language ?? "fr");
-			(window as any).__github_sync_locale = getLocale();
-		} catch {}
+		if (saved) {
+			this.config = { ...DEFAULT_CONFIG, ...saved };
+			this.runtimeEncryptionPassword =
+				this.config.encryptionPassword || undefined;
+			try {
+				setLocale(this.config.language ?? "fr");
+				(window as any).__github_sync_locale = getLocale();
+			} catch {}
+		}
 		this.registerSettings();
 		this.addTopBar({
 			icon: "iconGitHubUpload",
@@ -98,7 +181,6 @@ export default class GitHubSyncPlugin extends Plugin {
 	private attachToStatusBar() {
 		const old = document.getElementById("siyuan-github-sync-status");
 		if (old) old.remove();
-
 		const tryAttach = (parent: Element) => {
 			this.statusBarEl = document.createElement("span");
 			this.statusBarEl.id = "siyuan-github-sync-status";
@@ -108,7 +190,6 @@ export default class GitHubSyncPlugin extends Plugin {
 			parent.appendChild(this.statusBarEl);
 			return true;
 		};
-
 		const target =
 			document.querySelector("#statusBar #status") ||
 			document.querySelector("#statusBar");
@@ -131,9 +212,9 @@ export default class GitHubSyncPlugin extends Plugin {
 			const mm = String(d.getMinutes()).padStart(2, "0");
 			const dd = String(d.getDate()).padStart(2, "0");
 			const mo = String(d.getMonth() + 1).padStart(2, "0");
-			this.statusBarEl.textContent = `☁️ ${dd}/${mo} ${hh}:${mm}`;
+			this.statusBarEl.innerHTML = `<span style="display:inline-flex;align-items:center;gap:4px;">☁️ Sync: ${dd}/${mo} ${hh}:${mm}</span>`;
 		} else {
-			this.statusBarEl.textContent = "☁️ Sync";
+			this.statusBarEl.innerHTML = `<span style="display:inline-flex;align-items:center;gap:4px;">☁️ Sync: --/--</span>`;
 		}
 	}
 
@@ -156,10 +237,12 @@ export default class GitHubSyncPlugin extends Plugin {
 			this.config.groqKey,
 			"password",
 		);
+
 		const dIn = document.createElement("input");
 		dIn.type = "checkbox";
 		dIn.checked = this.config.showDiff;
 		dIn.style.cssText = "width:16px;height:16px;cursor:pointer;margin:0;";
+
 		const tBtn = document.createElement("button");
 		tBtn.className = "b3-button b3-button--outline fn__block";
 		tBtn.textContent = t("button.test_github");
@@ -171,29 +254,86 @@ export default class GitHubSyncPlugin extends Plugin {
 			tBtn.disabled = false;
 		};
 
+		const pIn = this.mkInput(
+			t("setting.encryption_password"),
+			this.config.encryptionPassword || "",
+			"password",
+		);
+		pIn.title = t("hint.encryption_password");
+
+		const pToggle = document.createElement("button");
+		pToggle.type = "button";
+		pToggle.className = "b3-button b3-button--outline";
+		pToggle.style.cssText = "margin-left:8px;padding:4px 8px;font-size:14px;";
+		pToggle.textContent = "👁️";
+		pToggle.onclick = () => {
+			if (pIn.type === "password") {
+				pIn.type = "text";
+				pToggle.textContent = "🙈";
+			} else {
+				pIn.type = "password";
+				pToggle.textContent = "👁️";
+			}
+		};
+
+		const sIn = this.mkInput(
+			t("setting.encryption_salt"),
+			this.config.encryptionSalt || "",
+			"text",
+		);
+		sIn.title = "Base64-encoded per-repo salt used for key derivation";
+
+		pIn.oninput = async () => {
+			const val = pIn.value.trim();
+			this.runtimeEncryptionPassword = val || undefined;
+			this.config.encryptionPassword = val || undefined;
+			if (val && !this.config.encryptionSalt) {
+				const rv = crypto.getRandomValues(new Uint8Array(16));
+				this.config.encryptionSalt = btoa(
+					Array.from(rv)
+						.map((b) => String.fromCharCode(b))
+						.join(""),
+				);
+				try {
+					await this.saveData(STORAGE_KEY, this.config);
+				} catch (e) {}
+			}
+		};
+
+		const pWarn = document.createElement("div");
+		pWarn.style.cssText =
+			"font-size:12px;opacity:.8;margin-top:6px;color:var(--b3-theme-on-surface);";
+		pWarn.textContent = t("hint.encryption_password");
+
 		const eBtn = document.createElement("button");
 		eBtn.className = "b3-button b3-button--outline fn__block";
 		eBtn.textContent = t("button.export");
 		eBtn.onclick = () => {
 			const hasToken = !!tIn.value.trim();
 			const hasGroq = !!gIn.value.trim();
+			const hasPassword = !!pIn.value.trim();
 			const warnParts: string[] = [];
 			if (hasToken) warnParts.push(t("part.the") + "GitHub token");
 			if (hasGroq) warnParts.push(t("part.the") + "the Groq API key");
+			if (hasPassword) warnParts.push(t("part.the") + "encryption password");
+
 			if (warnParts.length > 0) {
 				const ok = confirm(
-					`${t("msg.export_warning_prefix")} ${warnParts.join(t("part.and"))}{t('part.export_warning_suffix')}`,
+					`${t("msg.export_warning_prefix")} ${warnParts.join(t("part.and"))}${t("part.export_warning_suffix")}`,
 				);
 				if (!ok) return;
 			}
-			const cfg = {
+			const cfg: any = {
 				username: uIn.value.trim(),
 				repo: rIn.value.trim(),
 				token: tIn.value.trim(),
 				groqKey: gIn.value.trim(),
 				showDiff: dIn.checked,
 				language: (this.config && this.config.language) || "fr",
+				encryptionSalt: this.config?.encryptionSalt || undefined,
 			};
+			if (pIn.value.trim()) cfg.encryptionPassword = pIn.value.trim();
+
 			const blob = new Blob([JSON.stringify(cfg, null, 2)], {
 				type: "application/json",
 			});
@@ -219,7 +359,7 @@ export default class GitHubSyncPlugin extends Plugin {
 					const text = await file.text();
 					const data = JSON.parse(text);
 					if (!data.username || !data.repo || !data.token) {
-						showMessage("❌ Invalid file", 6000, "error");
+						showMessage("  Invalid file", 6000, "error");
 						return;
 					}
 					uIn.value = data.username;
@@ -227,6 +367,12 @@ export default class GitHubSyncPlugin extends Plugin {
 					tIn.value = data.token;
 					gIn.value = data.groqKey || "";
 					dIn.checked = !!data.showDiff;
+					pIn.value = data.encryptionPassword || "";
+					if (data.encryptionSalt) {
+						this.config.encryptionSalt = data.encryptionSalt;
+						sIn.value = data.encryptionSalt;
+					}
+					this.runtimeEncryptionPassword = pIn.value.trim() || undefined;
 					if (data.language) {
 						try {
 							setLocale(data.language);
@@ -242,24 +388,62 @@ export default class GitHubSyncPlugin extends Plugin {
 
 		const btnRow = document.createElement("div");
 		btnRow.style.cssText = "display:flex;gap:8px;flex-wrap:wrap;";
+
+		const passWrap = document.createElement("div");
+		passWrap.style.cssText = "display:flex;gap:8px;align-items:center;";
+		passWrap.appendChild(pIn);
+		passWrap.appendChild(pToggle);
+
 		btnRow.appendChild(tBtn);
 		btnRow.appendChild(eBtn);
 		btnRow.appendChild(iBtn);
+
+		const forgetBtn = document.createElement("button");
+		forgetBtn.className = "b3-button b3-button--outline fn__block";
+		forgetBtn.textContent = t("button.forget_password");
+		forgetBtn.onclick = () => {
+			this.runtimeEncryptionPassword = undefined;
+			pIn.value = "";
+			this.config.encryptionPassword = undefined;
+			try {
+				this.saveData(STORAGE_KEY, this.config);
+			} catch {}
+			showMessage(t("msg.password_forgot"));
+		};
+		btnRow.appendChild(forgetBtn);
+
 		this.setting = new Setting({
 			confirmCallback: async () => {
 				this.config = {
+					...this.config, // preserves lastSync and other hidden properties
 					username: uIn.value.trim(),
 					repo: rIn.value.trim(),
 					token: tIn.value.trim(),
 					groqKey: gIn.value.trim(),
 					showDiff: dIn.checked,
 					language: this.config.language || "fr",
+					encryptionPassword: pIn.value.trim() || undefined,
+					encryptionSalt:
+						sIn && sIn.value.trim()
+							? sIn.value.trim()
+							: this.config.encryptionSalt,
 				};
+				if (pIn.value.trim()) {
+					this.runtimeEncryptionPassword = pIn.value.trim();
+					if (!this.config.encryptionSalt) {
+						const rv = crypto.getRandomValues(new Uint8Array(16));
+						this.config.encryptionSalt = btoa(
+							Array.from(rv)
+								.map((b) => String.fromCharCode(b))
+								.join(""),
+						);
+					}
+				}
 				await this.saveData(STORAGE_KEY, this.config);
 				showMessage(t("msg.saved"));
 			},
 		});
-		// language selector
+
 		const langSelect = document.createElement("select");
 		langSelect.className = "b3-select fn__block";
 		const _langLabels: Record<string, string> = langs;
@@ -294,6 +478,21 @@ export default class GitHubSyncPlugin extends Plugin {
 			title: t("setting.groq_key"),
 			createActionElement: () => gIn,
 		});
+
+		this.setting.addItem({
+			title: t("setting.encryption_password"),
+			createActionElement: () => {
+				const wrap = document.createElement("div");
+				wrap.appendChild(passWrap);
+				wrap.appendChild(pWarn);
+				return wrap;
+			},
+		});
+		this.setting.addItem({
+			title: t("setting.encryption_salt"),
+			createActionElement: () => sIn,
+		});
+
 		this.setting.addItem({
 			title: t("setting.show_diff"),
 			createActionElement: () => dIn,
@@ -316,8 +515,6 @@ export default class GitHubSyncPlugin extends Plugin {
 		el.type = type;
 		return el;
 	}
-
-	// ── Actions UI ───────────────────────────────────────────────────────────
 
 	private handlePushClick() {
 		if (this.activeTask === "pull") {
@@ -344,13 +541,31 @@ export default class GitHubSyncPlugin extends Plugin {
 	}
 
 	private showProgressUI(type: "push" | "pull") {
-		if (this.currentUI && !this.currentUI.isDestroyed) return;
+		if (this.currentUI && !this.currentUI.isDestroyed) {
+			// If the UI is already visible, just update it with the current state
+			if (this.lastProgress.finished) {
+				if (this.lastProgress.error)
+					this.currentUI.error(this.lastProgress.message);
+				else this.currentUI.finish(this.lastProgress.message);
+			} else {
+				this.currentUI.update(
+					this.lastProgress.percent,
+					this.lastProgress.status,
+					this.lastProgress.details,
+				);
+			}
+			return;
+		}
+
 		this.currentUI = new SyncProgressUI(
 			type === "push" ? t("top.push_title") : t("top.pull_title"),
 			() => {
+				// Only nullify the reference when the dialog is actually closed
 				this.currentUI = null;
 			},
 		);
+
+		// Apply the current state immediately upon creation
 		if (this.lastProgress.finished) {
 			if (this.lastProgress.error)
 				this.currentUI.error(this.lastProgress.message);
@@ -388,8 +603,6 @@ export default class GitHubSyncPlugin extends Plugin {
 		await this.saveData(SYNCED_STATE_KEY, { commitSha, files });
 	}
 
-	// ── Smart Delta Sync ─────────────────────────────────────────────────────
-
 	private async mergeBeforePush(
 		localFiles: FileToSync[],
 		remoteMap: Map<string, string>,
@@ -405,7 +618,6 @@ export default class GitHubSyncPlugin extends Plugin {
 			conflicted: [],
 			skippedLarge: 0,
 		};
-
 		const localPathSet = new Set(localFiles.map((f) => f.githubPath));
 		let processed = 0;
 		let skippedLarge = 0;
@@ -421,7 +633,6 @@ export default class GitHubSyncPlugin extends Plugin {
 				skippedLarge++;
 				continue;
 			}
-
 			const localSha = await calculateGitSha(content);
 			const remoteSha = remoteMap.get(f.githubPath);
 			const syncedSha = syncedFiles[f.githubPath];
@@ -429,31 +640,27 @@ export default class GitHubSyncPlugin extends Plugin {
 			if (localSha === remoteSha) {
 				plan.toReuse.push({ githubPath: f.githubPath, sha: remoteSha });
 			} else if (!remoteSha) {
-				// Store path reference only
 				plan.toUpload.push({
 					githubPath: f.githubPath,
 					siYuanPath: f.siYuanPath,
 				});
 			} else if (!syncedSha || localSha !== syncedSha) {
-				if (remoteSha !== syncedSha) {
+				if (remoteSha !== syncedSha)
 					plan.conflicted.push({
 						githubPath: f.githubPath,
 						siYuanPath: f.siYuanPath,
 					});
-				} else {
-					// Store path reference only
+				else
 					plan.toUpload.push({
 						githubPath: f.githubPath,
 						siYuanPath: f.siYuanPath,
 					});
-				}
 			} else {
 				plan.toPull.push({
 					githubPath: f.githubPath,
 					siYuanPath: f.siYuanPath,
 				});
 			}
-
 			processed++;
 			this.updateProgress(
 				5 + Math.round((processed / localFiles.length) * 70),
@@ -464,16 +671,12 @@ export default class GitHubSyncPlugin extends Plugin {
 		}
 
 		for (const [path] of remoteMap) {
-			if (path.startsWith(SYNC_ROOT) && !localPathSet.has(path)) {
+			if (path.startsWith(SYNC_ROOT) && !localPathSet.has(path))
 				plan.toDelete.push({ githubPath: path });
-			}
 		}
-
 		plan.skippedLarge = skippedLarge;
 		return plan;
 	}
-
-	// ── Push ─────────────────────────────────────────────────────────────────
 
 	private async pushToGitHub() {
 		if (!this.config.token) return showMessage(t("msg.configure_plugin"));
@@ -507,15 +710,18 @@ export default class GitHubSyncPlugin extends Plugin {
 
 			let lastCommitSha: string | null = null;
 			let remoteMap = new Map<string, string>();
-
 			let refRes = await api.getRef(branch);
+
 			if (refRes.ok) {
 				const refData = await refRes.json();
 				lastCommitSha = refData.object.sha;
 				const lastCommit = await (await api.getCommit(lastCommitSha)).json();
 				const remoteTree = await api.getRemoteTree(lastCommit.tree.sha);
 				remoteTree.forEach((item) => {
-					if (item.type === "blob") remoteMap.set(item.path, item.sha);
+					if (item.type === "blob") {
+						const orig = this.deobfuscateRemotePath(item.path);
+						remoteMap.set(orig, item.sha);
+					}
 				});
 			}
 
@@ -528,15 +734,13 @@ export default class GitHubSyncPlugin extends Plugin {
 
 			const remoteManifestSha = remoteMap.get(PLUGIN_MANIFEST_PATH);
 			const manifestChanged = remoteManifestSha !== manifestSha;
-
 			const remoteWidgetManifestSha = remoteMap.get(WIDGET_MANIFEST_PATH);
 			const widgetManifestChanged =
 				remoteWidgetManifestSha !== widgetManifestSha;
-
 			const remoteThemeManifestSha = remoteMap.get(THEME_MANIFEST_PATH);
 			const themeManifestChanged = remoteThemeManifestSha !== themeManifestSha;
-
 			let notebookManifestsChanged = false;
+
 			for (const nm of notebookManifests) {
 				const remoteNMSha = remoteMap.get(nm.githubPath);
 				const localNMSha = await calculateGitSha(nm.content);
@@ -547,14 +751,18 @@ export default class GitHubSyncPlugin extends Plugin {
 			}
 
 			for (const pull of plan.toPull) {
-				const remoteContent = await api.downloadFile(
-					pull.githubPath,
-					lastCommitSha || undefined,
-				);
-				if (remoteContent) await siYuanPutFile(pull.siYuanPath, remoteContent);
+				const pullSha = remoteMap.get(pull.githubPath);
+				if (pullSha) {
+					const remoteContent = await api.downloadBlob(pullSha);
+					if (remoteContent)
+						await siYuanPutFile(
+							pull.siYuanPath,
+							await this.maybeDecrypt(remoteContent),
+						);
+				}
 				plan.toReuse.push({
 					githubPath: pull.githubPath,
-					sha: remoteMap.get(pull.githubPath),
+					sha: remoteMap.get(pull.githubPath)!,
 				});
 			}
 
@@ -616,13 +824,24 @@ export default class GitHubSyncPlugin extends Plugin {
 			}
 
 			const treeItems: any[] = [];
-			for (const r of plan.toReuse)
+			const manifestPathSet = new Set<string>([
+				PLUGIN_MANIFEST_PATH,
+				WIDGET_MANIFEST_PATH,
+				THEME_MANIFEST_PATH,
+			]);
+			notebookManifests.forEach((nm) => manifestPathSet.add(nm.githubPath));
+
+			for (const r of plan.toReuse) {
+				const remotePath = manifestPathSet.has(r.githubPath)
+					? r.githubPath
+					: this.obfuscateRemotePath(r.githubPath);
 				treeItems.push({
-					path: r.githubPath,
+					path: remotePath,
 					mode: "100644",
 					type: "blob",
 					sha: r.sha,
 				});
+			}
 
 			const uploadedSummaries: { path: string; content: string }[] = [];
 			for (let i = 0; i < plan.toUpload.length; i++) {
@@ -632,13 +851,11 @@ export default class GitHubSyncPlugin extends Plugin {
 					`Upload : ${i + 1}/${plan.toUpload.length}`,
 					u.githubPath,
 				);
-
-				// LAZY LOAD: Fetch file from SiYuan only at the exact moment of upload
-				// avoid keeping potentially large files in RAM
 				const content = await siYuanGetFile(u.siYuanPath);
 				if (!content) continue;
-
-				const blobRes = await api.createBlob(arrayBufferToBase64(content));
+				const blobRes = await api.createBlob(
+					arrayBufferToBase64(await this.maybeEncrypt(content)),
+				);
 				if (!blobRes.ok) {
 					console.error(
 						`[GitHub Sync] Blob failed for ${u.githubPath}:`,
@@ -647,8 +864,11 @@ export default class GitHubSyncPlugin extends Plugin {
 					continue;
 				}
 				const blobData = await blobRes.json();
+				const remotePath = manifestPathSet.has(u.githubPath)
+					? u.githubPath
+					: this.obfuscateRemotePath(u.githubPath);
 				treeItems.push({
-					path: u.githubPath,
+					path: remotePath,
 					mode: "100644",
 					type: "blob",
 					sha: blobData.sha,
@@ -657,11 +877,13 @@ export default class GitHubSyncPlugin extends Plugin {
 					path: u.githubPath,
 					content: extractTextFromSyFile(content),
 				});
-				// 'content' variable falls out of scope here, freeing RAM.
 			}
 
 			for (const d of plan.toDelete) {
-				treeItems.push({ path: d.githubPath, mode: "100644", sha: null });
+				const remotePath = manifestPathSet.has(d.githubPath)
+					? d.githubPath
+					: this.obfuscateRemotePath(d.githubPath);
+				treeItems.push({ path: remotePath, mode: "100644", sha: null });
 				uploadedSummaries.push({
 					path: d.githubPath,
 					content: t("msg.file_deleted"),
@@ -669,25 +891,38 @@ export default class GitHubSyncPlugin extends Plugin {
 			}
 
 			this.updateProgress(
-				85,
+				90,
 				t("progress.upload_plugin_manifest"),
 				PLUGIN_MANIFEST_PATH,
 			);
-			const manifestBlobRes = await api.createBlob(
-				arrayBufferToBase64(pluginManifest.content),
-			);
-			if (manifestBlobRes.ok) {
-				const manifestBlobData = await manifestBlobRes.json();
-				treeItems.push({
-					path: PLUGIN_MANIFEST_PATH,
-					mode: "100644",
-					type: "blob",
-					sha: manifestBlobData.sha,
-				});
+			try {
+				const manifestText = new TextDecoder().decode(pluginManifest.content);
+				const manifestJson = JSON.parse(manifestText);
+				manifestJson.encryptionSalt = this.config.encryptionSalt || null;
+				const manifestWithSaltBuf = new TextEncoder().encode(
+					JSON.stringify(manifestJson, null, 2),
+				).buffer;
+				const manifestBlobRes = await api.createBlob(
+					arrayBufferToBase64(manifestWithSaltBuf),
+				);
+				if (manifestBlobRes.ok) {
+					const manifestBlobData = await manifestBlobRes.json();
+					treeItems.push({
+						path: PLUGIN_MANIFEST_PATH,
+						mode: "100644",
+						type: "blob",
+						sha: manifestBlobData.sha,
+					});
+				}
+			} catch (e) {
+				console.error(
+					"[GitHub Sync] Failed to attach encryptionSalt to plugin manifest:",
+					e,
+				);
 			}
 
 			this.updateProgress(
-				87,
+				92,
 				t("progress.upload_widget_manifest"),
 				WIDGET_MANIFEST_PATH,
 			);
@@ -705,7 +940,7 @@ export default class GitHubSyncPlugin extends Plugin {
 			}
 
 			this.updateProgress(
-				88,
+				94,
 				t("progress.upload_theme_manifest"),
 				THEME_MANIFEST_PATH,
 			);
@@ -725,11 +960,14 @@ export default class GitHubSyncPlugin extends Plugin {
 			let notebooksUploaded = 0;
 			for (const nm of notebookManifests) {
 				this.updateProgress(
-					88,
+					96,
 					`Upload manifeste carnet (${++notebooksUploaded}/${notebookManifests.length})...`,
 					nm.githubPath,
 				);
-				const nmBlobRes = await api.createBlob(arrayBufferToBase64(nm.content));
+				// Encrypting notebook manifests to protect names during incremental push
+				const nmBlobRes = await api.createBlob(
+					arrayBufferToBase64(await this.maybeEncrypt(nm.content)),
+				);
 				if (nmBlobRes.ok) {
 					const nmBlobData = await nmBlobRes.json();
 					treeItems.push({
@@ -742,28 +980,24 @@ export default class GitHubSyncPlugin extends Plugin {
 			}
 
 			this.updateProgress(
-				90,
+				98,
 				t("progress.finalizing"),
 				t("progress.creating_tree"),
 			);
-
 			const baseTreeRes = await api.getCommit(lastCommitSha);
 			const baseTreeData = await baseTreeRes.json();
-
 			let currentTreeSha = baseTreeData.tree.sha;
 			const CHUNK_SIZE = 400;
 
 			for (let i = 0; i < treeItems.length; i += CHUNK_SIZE) {
 				const chunk = treeItems.slice(i, i + CHUNK_SIZE);
 				const treeRes = await api.createTree(currentTreeSha, chunk);
-
 				if (!treeRes.ok) {
 					const errText = await treeRes.text();
 					throw new Error(
 						`[GitHub Sync] Tree creation failed (Chunk ${Math.floor(i / CHUNK_SIZE) + 1}): ${treeRes.statusText} - ${errText}`,
 					);
 				}
-
 				const treeData = await treeRes.json();
 				currentTreeSha = treeData.sha;
 			}
@@ -812,9 +1046,10 @@ export default class GitHubSyncPlugin extends Plugin {
 				parts.push(`${plan.toDelete.length} ${t("stat.deleted")}`);
 			if (plan.toReuse.length)
 				parts.push(`${plan.toReuse.length} ${t("stat.unchanged")}`);
+
 			let msg = `${t("msg.push_done_prefix")} ${parts.join(", ")}.`;
 			if (plan.skippedLarge)
-				msg += ` ⚠️ ${plan.skippedLarge} ${t("msg.skipped_files")}`;
+				msg += `   ${plan.skippedLarge} ${t("msg.skipped_files")}`;
 			if (plan.conflicted.length) {
 				const conflictNote = t("msg.conflicts_unresolved").replace(
 					"{n}",
@@ -822,6 +1057,7 @@ export default class GitHubSyncPlugin extends Plugin {
 				);
 				msg += conflictNote;
 			}
+
 			this.lastProgress = {
 				...this.lastProgress,
 				finished: true,
@@ -855,23 +1091,31 @@ export default class GitHubSyncPlugin extends Plugin {
 		const total = plan.toUpload.length;
 		let errors = 0;
 		const treeItems: any[] = [];
+		const manifestPathSet = new Set<string>([
+			PLUGIN_MANIFEST_PATH,
+			WIDGET_MANIFEST_PATH,
+			THEME_MANIFEST_PATH,
+		]);
+		notebookManifests.forEach((nm) => manifestPathSet.add(nm.githubPath));
 
-		// 1. Upload Blobs lazily
 		for (const u of plan.toUpload) {
 			this.updateProgress(
 				10 + Math.round((uploaded / Math.max(total, 1)) * 80),
 				`Upload : ${uploaded + 1}/${total}`,
 				u.githubPath,
 			);
-
 			const content = await siYuanGetFile(u.siYuanPath);
 			if (!content) continue;
-
-			const blobRes = await api.createBlob(arrayBufferToBase64(content));
+			const blobRes = await api.createBlob(
+				arrayBufferToBase64(await this.maybeEncrypt(content)),
+			);
 			if (blobRes.ok) {
 				const blobData = await blobRes.json();
+				const remotePath = manifestPathSet.has(u.githubPath)
+					? u.githubPath
+					: this.obfuscateRemotePath(u.githubPath);
 				treeItems.push({
-					path: u.githubPath,
+					path: remotePath,
 					mode: "100644",
 					type: "blob",
 					sha: blobData.sha,
@@ -882,15 +1126,19 @@ export default class GitHubSyncPlugin extends Plugin {
 			}
 		}
 
-		// 2. Upload Manifest Blobs
-		const manifests = [
-			pluginManifest,
-			widgetManifest,
-			themeManifest,
-			...notebookManifests,
-		];
-		for (const m of manifests) {
-			const mRes = await api.createBlob(arrayBufferToBase64(m.content));
+		for (const m of [pluginManifest, widgetManifest, themeManifest]) {
+			let content = m.content;
+			if (m === pluginManifest) {
+				try {
+					const manifestText = new TextDecoder().decode(m.content);
+					const manifestJson = JSON.parse(manifestText);
+					manifestJson.encryptionSalt = this.config.encryptionSalt || null;
+					content = new TextEncoder().encode(
+						JSON.stringify(manifestJson, null, 2),
+					).buffer;
+				} catch (e) {}
+			}
+			const mRes = await api.createBlob(arrayBufferToBase64(content));
 			if (mRes.ok) {
 				const mData = await mRes.json();
 				treeItems.push({
@@ -904,50 +1152,59 @@ export default class GitHubSyncPlugin extends Plugin {
 			}
 		}
 
-		// 3. Create a single Tree and Commit
+		for (const m of notebookManifests) {
+			// Protect notebook titles strictly
+			const mRes = await api.createBlob(
+				arrayBufferToBase64(await this.maybeEncrypt(m.content)),
+			);
+			if (mRes.ok) {
+				const mData = await mRes.json();
+				treeItems.push({
+					path: m.githubPath,
+					mode: "100644",
+					type: "blob",
+					sha: mData.sha,
+				});
+			} else {
+				errors++;
+			}
+		}
+
 		if (treeItems.length > 0) {
 			this.updateProgress(
-				90,
+				95,
 				t("progress.finalizing"),
 				t("progress.creating_tree"),
 			);
-
-			let currentTreeSha = ""; // For initial push, this remains ""
-			const CHUNK_SIZE = 200; // Reduced from 400 to lighten server load
+			await sleep(2000);
+			let currentTreeSha = "";
+			const CHUNK_SIZE = 100;
 
 			for (let i = 0; i < treeItems.length; i += CHUNK_SIZE) {
 				const chunk = treeItems.slice(i, i + CHUNK_SIZE);
 				let treeRes: Response | undefined;
-				let attempts = 3;
-
-				// Retry logic specifically for 502 server errors
-				while (attempts > 0) {
+				let attempts = 0;
+				const maxAttempts = 5;
+				while (attempts < maxAttempts) {
 					treeRes = await api.createTree(currentTreeSha, chunk);
 					if (treeRes.ok) break;
-
-					if (treeRes.status === 502 || treeRes.status === 500) {
-						console.warn(
-							`[GitHub Sync] Server error on chunk ${Math.floor(i / CHUNK_SIZE) + 1}. Retrying in 3 seconds...`,
-						);
-						await sleep(3000); // Backoff before retry
-						attempts--;
+					if (treeRes.status >= 500) {
+						attempts++;
+						const delay = attempts * 5000;
+						await sleep(delay);
 					} else {
-						break; // Stop retrying on permanent errors like 422 or 404
+						break;
 					}
 				}
-
 				if (!treeRes || !treeRes.ok) {
-					const errText = await treeRes.text();
+					const errText = (await treeRes?.text()) || "Unknown API Error";
 					throw new Error(
-						`[GitHub Sync] Tree creation failed (Chunk ${Math.floor(i / CHUNK_SIZE) + 1}): ${treeRes.statusText} - ${errText}`,
+						`[GitHub Sync] Tree creation failed (Chunk ${Math.floor(i / CHUNK_SIZE) + 1}): ${treeRes?.statusText} - ${errText}`,
 					);
 				}
-
 				const treeData = await treeRes.json();
 				currentTreeSha = treeData.sha;
-
-				// Allow GitHub's backend to process the tree merge before sending the next chunk
-				await sleep(1000);
+				await sleep(2000);
 			}
 
 			const commitRes = await api.createCommit("Sync init", currentTreeSha, []);
@@ -958,7 +1215,6 @@ export default class GitHubSyncPlugin extends Plugin {
 				);
 			}
 			const commitData = await commitRes.json();
-
 			const refRes = await api.updateRef(branch, commitData.sha);
 			if (!refRes.ok) {
 				const errText = await refRes.text();
@@ -977,255 +1233,193 @@ export default class GitHubSyncPlugin extends Plugin {
 		let msg = t("msg.push_initial_done").replace("{n}", String(uploaded));
 		if (errors > 0)
 			msg += t("msg.errors_occurred").replace("{n}", String(errors));
-
 		this.lastProgress = { ...this.lastProgress, finished: true, message: msg };
+
+		await this.saveSyncTimestamp();
+
 		if (this.currentUI) this.currentUI.finish(msg);
 	}
 
-	// ── Pull ─────────────────────────────────────────────────────────────────
-
 	private async pullFromGitHub() {
-		if (!this.config.token) return showMessage(t("msg.configure_plugin"));
-		this.activeTask = "pull";
-		this.lastProgress = {
-			percent: 0,
-			status: t("progress.analysis"),
-			details: t("progress.reading_remote"),
-			finished: false,
-			error: false,
-			message: "",
-		};
-		this.showProgressUI("pull");
+        if (!this.config.token) return showMessage(t("msg.configure_plugin"));
+        this.activeTask = "pull";
+        this.lastProgress = { percent: 0, status: t("progress.analysis"), details: t("progress.reading_remote"), finished: false, error: false, message: "" };
+        this.showProgressUI("pull");
 
-		try {
-			const api = new GitHubAPI(
-				this.config.token,
-				this.config.username,
-				this.config.repo,
-			);
-			const repoInfo = await (await api.getRepoInfo()).json();
-			const branch = repoInfo.default_branch || "main";
+        try {
+            const api = new GitHubAPI(this.config.token, this.config.username, this.config.repo);
+            const repoInfo = await (await api.getRepoInfo()).json();
+            const branch = repoInfo.default_branch || "main";
+            const refRes = await api.getRef(branch);
 
-			const refRes = await api.getRef(branch);
-			if (!refRes.ok) {
-				const msg = t("msg.repo_empty");
-				this.lastProgress = {
-					...this.lastProgress,
-					finished: true,
-					message: msg,
-				};
-				if (this.currentUI) this.currentUI.finish(msg);
-				return;
-			}
-			const refData = await refRes.json();
-			const lastCommit = await (await api.getCommit(refData.object.sha)).json();
-			const remoteItems = (await api.getRemoteTree(lastCommit.tree.sha)).filter(
-				(i) => {
-					if (i.type !== "blob") return false;
-					const p = i.path;
-					if (p.startsWith("data/")) {
-						const rest = p.slice(5);
-						const firstSegment = rest.split("/")[0];
-						if (SKIP_ROOT_DIRS.includes(firstSegment)) return false;
-					}
-					return p.startsWith(SYNC_ROOT);
-				},
-			);
+            if (!refRes.ok) {
+                this.lastProgress = { ...this.lastProgress, finished: true, message: t("msg.repo_empty") };
+                if (this.currentUI) this.currentUI.finish(t("msg.repo_empty"));
+                return;
+            }
 
-			let updated = 0,
-				skipped = 0,
-				errors = 0;
-			for (let i = 0; i < remoteItems.length; i++) {
-				const item = remoteItems[i];
-				const siPath = item.path.slice(SYNC_ROOT.length).replace(/^\//, "");
-				this.updateProgress(
-					Math.round((i / remoteItems.length) * 100),
-					`Pull : ${i + 1}/${remoteItems.length}`,
-					siPath,
-				);
+            const refData = await refRes.json();
+            const lastCommit = await (await api.getCommit(refData.object.sha)).json();
+            const remoteItems = (await api.getRemoteTree(lastCommit.tree.sha)).filter((i) => {
+                if (i.type !== "blob") return false;
+                const p = i.path;
+                if (p.startsWith("data/")) {
+                    const rest = p.slice(5);
+                    const firstSegment = rest.split("/")[0];
+                    if (SKIP_ROOT_DIRS.includes(firstSegment)) return false;
+                }
+                return p.startsWith(SYNC_ROOT);
+            });
 
-				if (
-					LOCKED_EXTENSIONS.some((ext) => siPath.toLowerCase().endsWith(ext)) ||
-					siPath.includes("/temp/") ||
-					SKIP_PATH_FRAGMENTS.some((f) => siPath.includes(f))
-				) {
-					skipped++;
-					continue;
-				}
+            const manifestItem = remoteItems.find((i) => i.path === PLUGIN_MANIFEST_PATH);
+            if (manifestItem) {
+                const manifestContent = await api.downloadBlob(manifestItem.sha);
+                if (manifestContent) {
+                    try {
+                        const manifest = JSON.parse(new TextDecoder().decode(manifestContent));
+                        if (manifest.encryptionSalt && manifest.encryptionSalt !== this.config.encryptionSalt) {
+                            this.config.encryptionSalt = manifest.encryptionSalt;
+                            await this.saveData(STORAGE_KEY, this.config);
+                        }
+                    } catch (e) { /* ignore */ }
+                }
+            }
 
-				if (siPath.endsWith(".siyuan.sy")) {
-					skipped++;
-					continue;
-				}
+            for (let i = 0; i < remoteItems.length; i++) {
+                const item = remoteItems[i];
+                let siPath = item.path.slice(SYNC_ROOT.length).replace(/^\//, "");
 
-				const localContent = await siYuanGetFile(siPath);
-				const localSha = localContent
-					? await calculateGitSha(localContent)
-					: "";
+                if (item.path.startsWith(`${SYNC_ROOT}/enc/`)) {
+                    siPath = this.deobfuscateRemotePath(item.path).slice(SYNC_ROOT.length).replace(/^\//, "");
+                }
 
-				if (localSha === item.sha) {
-					skipped++;
-				} else {
-					const content = await api.downloadFile(item.path);
-					if (content && content.byteLength > 0) {
-						const ok = await siYuanPutFile(siPath, content);
-						if (ok) {
-							updated++;
-						} else {
-							errors++;
-							console.error(`[GitHub Sync] Write Failed: ${siPath}`);
-						}
-					} else {
-						errors++;
-						console.error(`[GitHub Sync] Load Failed: ${item.path}`);
-					}
-				}
-				await sleep(30);
-			}
+                if (LOCKED_EXTENSIONS.some((ext) => siPath.toLowerCase().endsWith(ext)) || siPath.includes("/temp/") || SKIP_PATH_FRAGMENTS.some((f) => siPath.includes(f))) {
+                    continue;
+                }
+                if (siPath.endsWith(".siyuan.sy")) { continue; }
 
-			await siYuanRefreshFiletree();
+                const localContent = await siYuanGetFile(siPath);
+                const localSha = localContent ? await calculateGitSha(localContent) : "";
 
-			const onProgress = (pct: number, status: string, details: string) =>
-				this.updateProgress(pct, status, details);
+                if (localSha !== item.sha) {
+                    const content = await api.downloadBlob(item.sha);
+                    if (content && content.byteLength > 0) {
+                        try {
+                            const decrypted = await this.maybeDecrypt(content);
 
-			let pluginsInstalled = 0;
-			const manifestItem = remoteItems.find(
-				(i) => i.path === PLUGIN_MANIFEST_PATH,
-			);
-			if (manifestItem) {
-				const manifestContent = await api.downloadFile(manifestItem.path);
-				if (manifestContent) {
-					try {
-						const manifest = JSON.parse(
-							new TextDecoder().decode(manifestContent),
-						);
-						pluginsInstalled = await installMissingPlugins(
-							manifest,
-							onProgress,
-						);
-					} catch {
-						/* ignore */
-					}
-				}
-			}
+                            try {
+                                const text = new TextDecoder().decode(decrypted);
+                                console.log(`[DIAGNOSTIC] Path: ${siPath} | Valid Text?: YES | Preview: ${text.slice(0, 100)}...`);
+                            } catch (err) {
+                                console.error(`[DIAGNOSTIC] Path: ${siPath} | Valid Text?: NO (Binary or corrupted)`);
+                            }
 
-			let widgetsInstalled = 0;
-			const widgetManifestItem = remoteItems.find(
-				(i) => i.path === WIDGET_MANIFEST_PATH,
-			);
-			if (widgetManifestItem) {
-				const widgetManifestContent = await api.downloadFile(
-					widgetManifestItem.path,
-				);
-				if (widgetManifestContent) {
-					try {
-						const wManifest = JSON.parse(
-							new TextDecoder().decode(widgetManifestContent),
-						);
-						widgetsInstalled = await installMissingWidgets(
-							wManifest,
-							onProgress,
-						);
-					} catch {
-						/* ignore */
-					}
-				}
-			}
+                            await siYuanPutFile(siPath, decrypted);
+                        } catch (decryptErr) {
+                            console.error(`[DIAGNOSTIC] Failed to decrypt ${siPath}`);
+                        }
+                    }
+                }
+                await sleep(30);
+            }
 
-			let themesInstalled = 0;
-			const themeManifestItem = remoteItems.find(
-				(i) => i.path === THEME_MANIFEST_PATH,
-			);
-			if (themeManifestItem) {
-				const themeManifestContent = await api.downloadFile(
-					themeManifestItem.path,
-				);
-				if (themeManifestContent) {
-					try {
-						const tManifest = JSON.parse(
-							new TextDecoder().decode(themeManifestContent),
-						);
-						themesInstalled = await installMissingThemes(tManifest, onProgress);
-					} catch {
-						/* ignore */
-					}
-				}
-			}
+            try {
+                await processNotebookManifests(remoteItems, api, (buf) => this.maybeDecrypt(buf));
+            } catch { /* ignore */ }
 
-			let notebooksProcessed = 0;
-			try {
-				notebooksProcessed = await processNotebookManifests(
-					remoteItems,
-					api,
-					onProgress,
-				);
-				await siYuanRefreshFiletree();
-			} catch {
-				/* ignore */
-			}
+            console.warn("=================================================");
+            console.warn("[DIAGNOSTIC PAUSE] Pull completed. Reload is disabled.");
+            console.warn("1. Check the console logs above for '[DIAGNOSTIC]' lines.");
+            console.warn("2. Open your terminal and check the contents of your workspace /data/ folder.");
+            console.warn("3. 'cat' one of the newly pulled .sy files to verify its contents.");
+            console.warn("=================================================");
 
-			const localFilesForDelete = await collectDir("/", SYNC_ROOT);
-			const remotePathSet = new Set(remoteItems.map((i) => i.path));
-			let deleted = 0;
-			for (const lf of localFilesForDelete) {
-				if (
-					LOCKED_EXTENSIONS.some((ext) =>
-						lf.githubPath.toLowerCase().endsWith(ext),
-					) ||
-					lf.githubPath.endsWith(".siyuan.sy")
-				)
-					continue;
-				if (
-					!remotePathSet.has(lf.githubPath) &&
-					!remotePathSet.has(lf.githubPath.replace(/^\//, ""))
-				) {
-					const ok = await siYuanRemoveFile(lf.siYuanPath);
-					if (ok) deleted++;
-				}
-			}
+            this.lastProgress = { ...this.lastProgress, finished: true, message: "Diagnostic pull complete. Check console." };
+            if (this.currentUI) this.currentUI.finish("Diagnostic pull complete. Check console.", false);
+            await this.saveSyncTimestamp();
 
-			const newFilesState: Record<string, string> = {};
-			remoteItems.forEach((item) => {
-				newFilesState[item.path] = item.sha;
-			});
-			await this.saveSyncedState(refData.object.sha, newFilesState);
+        } catch (e) {
+            this.lastProgress = { ...this.lastProgress, finished: true, error: true, message: friendlyError(e) };
+            if (this.currentUI) this.currentUI.error(friendlyError(e));
+        } finally {
+            this.activeTask = null;
+        }
+    }
 
-			let msg = t("msg.pull_done")
-				.replace("{updated}", String(updated))
-				.replace("{skipped}", String(skipped))
-				.replace("{deleted}", String(deleted));
-			if (pluginsInstalled > 0)
-				msg += ` ${t("msg.plugins_installed").replace("{n}", String(pluginsInstalled))}`;
-			if (widgetsInstalled > 0)
-				msg += ` ${t("msg.widgets_installed").replace("{n}", String(widgetsInstalled))}`;
-			if (themesInstalled > 0)
-				msg += ` ${t("msg.themes_installed").replace("{n}", String(themesInstalled))}`;
-			if (notebooksProcessed > 0)
-				msg += ` ${t("msg.notebooks_processed").replace("{n}", String(notebooksProcessed))}`;
-			if (errors > 0)
-				msg += ` ${t("msg.errors").replace("{n}", String(errors))}`;
-			this.lastProgress = {
-				...this.lastProgress,
-				finished: true,
-				message: msg,
-			};
-			if (this.currentUI) this.currentUI.finish(msg, false);
-			await this.saveSyncTimestamp();
-			setTimeout(() => window.location.reload(), 1500);
-		} catch (e) {
-			this.lastProgress = {
-				...this.lastProgress,
-				finished: true,
-				error: true,
-				message: friendlyError(e),
-			};
-			if (this.currentUI) this.currentUI.error(friendlyError(e));
-		} finally {
-			this.activeTask = null;
-		}
-	}
+	async restoreCommit(sha: string, message: string) {
+        const api = new GitHubAPI(this.config.token, this.config.username, this.config.repo);
+        const commitRes = await api.getCommit(sha);
+        if (!commitRes.ok) throw new Error(t("error.cannot_fetch_commit") || "Cannot fetch commit");
 
-	// ── Historique & Restauration ──────────────────────────────────────────
+        const commitData = await commitRes.json();
+        const treeItems = await api.getRemoteTree(commitData.tree.sha);
+        const blobs = treeItems.filter(
+            (i) => i.type === "blob" && i.path.startsWith(SYNC_ROOT) && !i.path.startsWith("data/plugins/siyuan-github-sync/"),
+        );
+
+        const manifestItem = treeItems.find((i) => i.path === PLUGIN_MANIFEST_PATH);
+        if (manifestItem) {
+            const manifestContent = await api.downloadBlob(manifestItem.sha);
+            if (manifestContent) {
+                try {
+                    const manifest = JSON.parse(new TextDecoder().decode(manifestContent));
+                    if (manifest.encryptionSalt && manifest.encryptionSalt !== this.config.encryptionSalt) {
+                        this.config.encryptionSalt = manifest.encryptionSalt;
+                        await this.saveData(STORAGE_KEY, this.config);
+                    }
+                } catch (e) {}
+            }
+        }
+
+        let updated = 0;
+        for (const item of blobs) {
+            let siPath = item.path.slice(SYNC_ROOT.length).replace(/^\//, "");
+
+            if (item.path.startsWith(`${SYNC_ROOT}/enc/`)) {
+                siPath = this.deobfuscateRemotePath(item.path).slice(SYNC_ROOT.length).replace(/^\//, "");
+            }
+
+            if (siPath.endsWith(`/${NOTEBOOK_MANIFEST_FILE}`)) {
+                continue;
+            }
+
+            if (LOCKED_EXTENSIONS.some((ext) => siPath.toLowerCase().endsWith(ext)) || siPath.includes("/temp/") || SKIP_PATH_FRAGMENTS.some((f) => siPath.includes(f)) || siPath.endsWith(".siyuan.sy")) {
+                continue;
+            }
+            const writePath = siPath;
+
+            const content = await api.downloadBlob(item.sha);
+            if (content && content.byteLength > 0) {
+                try {
+                    const decrypted = await this.maybeDecrypt(content);
+                    await siYuanPutFile(writePath, decrypted);
+                    updated++;
+                } catch (e) {
+                    // Ignore and skip
+                }
+                await sleep(30);
+            }
+        }
+        await siYuanRefreshFiletree();
+
+        try {
+            await processNotebookManifests(treeItems, api, (buf) => this.maybeDecrypt(buf));
+        } catch { /* ignore */ }
+
+        const newFilesState: Record<string, string> = {};
+        treeItems.forEach((item) => {
+            if (item.type === "blob") newFilesState[item.path] = item.sha;
+        });
+        await this.saveSyncedState(sha, newFilesState);
+
+        showMessage(
+            t("msg.restored")
+                .replace("{n}", String(updated))
+                .replace("{sha}", sha.slice(0, 7))
+                .replace("{message}", message),
+        );
+        await this.saveSyncTimestamp();
+    }
 
 	private async handleHistoryClick() {
 		if (!this.config.token) return showMessage(t("msg.configure_plugin"));
@@ -1242,71 +1436,5 @@ export default class GitHubSyncPlugin extends Plugin {
 			this.config.repo,
 		);
 		return api.getCommits();
-	}
-
-	async restoreCommit(sha: string, message: string) {
-		const api = new GitHubAPI(
-			this.config.token,
-			this.config.username,
-			this.config.repo,
-		);
-		const commitRes = await api.getCommit(sha);
-		if (!commitRes.ok)
-			throw new Error(t("error.cannot_fetch_commit") || "Cannot fetch commit");
-		const commitData = await commitRes.json();
-		const treeItems = await api.getRemoteTree(commitData.tree.sha);
-		const blobs = treeItems.filter(
-			(i) =>
-				i.type === "blob" &&
-				i.path.startsWith(SYNC_ROOT) &&
-				!i.path.startsWith("data/plugins/siyuan-github-sync/"),
-		);
-
-		let updated = 0;
-		for (const item of blobs) {
-			const siPath = item.path.slice(SYNC_ROOT.length).replace(/^\//, "");
-			if (
-				LOCKED_EXTENSIONS.some((ext) => siPath.toLowerCase().endsWith(ext)) ||
-				siPath.includes("/temp/") ||
-				SKIP_PATH_FRAGMENTS.some((f) => siPath.includes(f)) ||
-				siPath.endsWith(".siyuan.sy")
-			)
-				continue;
-
-			let writePath = siPath;
-			if (isThemePath(item.path)) {
-				writePath = themeGithubToLocal(item.path);
-			}
-
-			const content = await api.downloadFile(item.path, sha);
-			if (content && content.byteLength > 0) {
-				await siYuanPutFile(writePath, content);
-				updated++;
-			}
-			await sleep(30);
-		}
-
-		await siYuanRefreshFiletree();
-
-		try {
-			const notebooksProcessed = await processNotebookManifests(treeItems, api);
-			if (notebooksProcessed > 0) await siYuanRefreshFiletree();
-		} catch {
-			/* ignore */
-		}
-
-		const newFilesState: Record<string, string> = {};
-		treeItems.forEach((item) => {
-			if (item.type === "blob") newFilesState[item.path] = item.sha;
-		});
-		await this.saveSyncedState(sha, newFilesState);
-
-		showMessage(
-			t("msg.restored")
-				.replace("{n}", String(updated))
-				.replace("{sha}", sha.slice(0, 7))
-				.replace("{message}", message),
-		);
-		setTimeout(() => window.location.reload(), 1500);
 	}
 }

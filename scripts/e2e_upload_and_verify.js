@@ -1,0 +1,82 @@
+const https = require('https');
+const fs = require('fs');
+
+function req(opts, body) {
+  return new Promise((resolve, reject) => {
+    const r = https.request(opts, res => {
+      let s = '';
+      res.on('data', c => s += c);
+      res.on('end', () => {
+        try { resolve({ status: res.statusCode, headers: res.headers, body: s }); }
+        catch (e) { reject(e); }
+      });
+    });
+    r.on('error', reject);
+    if (body) r.write(body);
+    r.end();
+  });
+}
+
+(async ()=>{
+  try{
+    const payloadFile = process.argv[2] || '/tmp/e2e_payload.json';
+    const payload = JSON.parse(fs.readFileSync(payloadFile,'utf8'));
+    const OWNER = process.env.OWNER || 'LuigiBrosNin';
+    const REPO = process.env.REPO || 'siyuan-workplace';
+    const TOKEN = process.env.TOKEN; // must be set
+    const BRANCH = process.env.BRANCH || 'main';
+    if(!TOKEN){ console.error('TOKEN env required'); process.exit(2); }
+
+    const path = payload.remotePath;
+    const basePath = `/repos/${OWNER}/${REPO}/contents/${encodeURIComponent(path)}`;
+
+    // Check if file exists
+    const getOpts = {
+      hostname: 'api.github.com', port: 443, path: `${basePath}?ref=${BRANCH}`, method: 'GET',
+      headers: { 'User-Agent': 'e2e-upload', Authorization: `token ${TOKEN}` }
+    };
+    const getRes = await req(getOpts);
+    let exists = false;
+    let existingSha = null;
+    if (getRes.status === 200) {
+      const j = JSON.parse(getRes.body);
+      exists = true;
+      existingSha = j.sha;
+    }
+
+    const putBody = JSON.stringify({
+      message: exists ? 'e2e: update encrypted file' : 'e2e: create encrypted file',
+      content: payload.blob_b64,
+      branch: BRANCH,
+      sha: existingSha || undefined
+    });
+
+    const putOpts = {
+      hostname: 'api.github.com', port: 443, path: basePath, method: 'PUT',
+      headers: {
+        'User-Agent': 'e2e-upload', Authorization: `token ${TOKEN}`, 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(putBody)
+      }
+    };
+
+    const putRes = await req(putOpts, putBody);
+    if (![200,201].includes(putRes.status)) {
+      console.error('Upload failed', putRes.status, putRes.body);
+      process.exit(2);
+    }
+    const putJ = JSON.parse(putRes.body);
+    const blobSha = putJ.content && putJ.content.sha;
+    console.log('Uploaded, blob sha:', blobSha);
+
+    // Now run decrypt script to verify
+    const spawn = require('child_process').spawnSync;
+    // Write a temp payload copy path to pass to decrypt
+    const tmpPayload = '/tmp/e2e_payload_for_decrypt.json';
+    fs.writeFileSync(tmpPayload, JSON.stringify(payload));
+    const proc = spawn('node', ['scripts/e2e_decrypt.js', tmpPayload, blobSha], { env: { ...process.env, TOKEN }, stdio: 'inherit' });
+    if (proc.status !== 0) {
+      console.error('Decrypt verification failed');
+      process.exit(2);
+    }
+    console.log('E2E upload+decrypt verification succeeded.');
+  }catch(e){ console.error('Error', e); process.exit(2); }
+})();

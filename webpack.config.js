@@ -55,6 +55,15 @@ module.exports = (env, argv) => {
         },
         resolve: {
             extensions: [".ts", ".js"],
+            // Polyfill lightweight path usage that some WASM packages expect
+            fallback: {
+                path: require.resolve("path-browserify"),
+                fs: false,
+            },
+        },
+        // Enable async WebAssembly modules used by Argon2 WASM packages
+        experiments: {
+            asyncWebAssembly: true,
         },
         module: {
             rules: [
