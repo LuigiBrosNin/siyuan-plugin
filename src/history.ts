@@ -65,7 +65,7 @@ export class HistoryDialog {
 			this.listEl.querySelectorAll(".restore-btn").forEach((btn) => {
 				btn.addEventListener("click", async (e) => {
 					const el = e.currentTarget as HTMLElement;
-					el.disabled = true;
+					(el as HTMLButtonElement).disabled = true;
 					el.textContent = "⏳...";
 					try {
 						await this.restoreCommit(el.dataset.sha, el.dataset.msg);
@@ -76,8 +76,8 @@ export class HistoryDialog {
 							6000,
 							"error",
 						);
-						el.disabled = false;
-						el.textContent = t("button.restore");
+(el as HTMLButtonElement).disabled = false;
+					el.textContent = t("button.restore");
 					}
 				});
 			});

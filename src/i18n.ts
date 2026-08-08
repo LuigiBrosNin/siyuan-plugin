@@ -31,6 +31,22 @@ const locales: Record<string, LocaleMap> = {
 		"msg.password_forgot":
 			"Mot de passe de chiffrement effacé de la mémoire ; vous ne pourrez plus déchiffrer les données précédemment envoyées sans lui.",
 
+		"dialog.remove_encryption_title": "🔓 Supprimer le chiffrement",
+		"dialog.remove_encryption_body":
+			"Le dépôt distant va être ré-uploadé SANS chiffrement :\n• tout le contenu sera ré-uploadé en clair (les NOMS des carnets seront aussi restaurés)\n• tous les anciens fichiers chiffrés seront supprimés du dépôt pour que personne ne puisse les récupérer.\n\nPour continuer, saisissez votre mot de passe de chiffrement ACTUEL. S'il est incorrect, la suppression sera refusée.",
+		"placeholder.current_password": "Mot de passe actuel",
+		"button.confirm": "✔️ Confirmer et ré-uploader",
+		"hint.remove_encryption":
+			"⚠️ Action irréversible : une fois les anciennes données chiffrées supprimées, elles ne pourront plus être récupérées.",
+		"error.password_required":
+			"❌ Saisissez le mot de passe de chiffrement actuel pour confirmer la suppression.",
+		"msg.encryption_removed":
+			"✅ Chiffrement supprimé : le dépôt a été ré-uploadé en clair.",
+		"progress.removing_encryption": "Suppression du chiffrement...",
+		"progress.verifying_password": "Vérification de l'ancien mot de passe...",
+		"progress.cleaning_enc": "Suppression des anciens fichiers chiffrés...",
+		"progress.uploading_plaintext": "Ré-upload en clair ({n})...",
+
 
 		"button.test_github": "🧪 Tester GitHub",
 		"button.export": "📥 Exporter",
@@ -128,6 +144,8 @@ const locales: Record<string, LocaleMap> = {
 		"msg.notebooks_processed": "📖 {n} carnet(s) ouvert(s).",
 		"msg.errors":
 			"⚠️ {n} erreur(s): Ouvrez les outils de développement pour afficher les détails (ctrl+shift+i).",
+		"msg.errors_occurred":
+			" ⚠️ {n} erreur(s). Ouvrez les outils de développement pour le détail (ctrl+shift+i).",
 		"msg.restored": "✅ Restauré : {n} fichiers (commit: {sha} - {message})",
 
 		"action.push": "⏳ Push en cours...",
@@ -172,6 +190,22 @@ const locales: Record<string, LocaleMap> = {
 			"Enter a password to enable client-side encryption. Do NOT lose it : without it data cannot be decrypted.",
 		"msg.password_forgot":
 			"Encryption password cleared from memory; you will not be able to decrypt previously uploaded data without it.",
+
+		"dialog.remove_encryption_title": "🔓 Remove encryption",
+		"dialog.remove_encryption_body":
+			"The remote repository will be re-pushed WITHOUT encryption:\n• all content will be re-uploaded in cleartext (notebook NAMES will be restored too)\n• every old encrypted file will be deleted from the remote so nobody can recover it.\n\nTo continue, enter your CURRENT encryption password. If it is wrong, the operation is refused.",
+		"placeholder.current_password": "Current password",
+		"button.confirm": "✔️ Confirm and re-upload",
+		"hint.remove_encryption":
+			"⚠️ Irreversible: once the old encrypted data is deleted it cannot be recovered.",
+		"error.password_required":
+			"❌ Enter the current encryption password to confirm removal.",
+		"msg.encryption_removed":
+			"✅ Encryption removed: the repository has been re-uploaded in cleartext.",
+		"progress.removing_encryption": "Removing encryption...",
+		"progress.verifying_password": "Verifying old password...",
+		"progress.cleaning_enc": "Deleting old encrypted files...",
+		"progress.uploading_plaintext": "Re-uploading in cleartext ({n})...",
 
 		"part.the": "the ",
 		"part.and": " and ",
@@ -244,6 +278,8 @@ const locales: Record<string, LocaleMap> = {
 		"msg.notebooks_processed": "📖 {n} notebook(s) opened.",
 		"msg.errors":
 			"⚠️ {n} error(s): Open dev tools to see details (ctrl+shift+i).",
+		"msg.errors_occurred":
+			" ⚠️ {n} error(s). Open developer tools for details (ctrl+shift+i).",
 		"msg.restored": "✅ Restored: {n} files (commit: {sha} - {message})",
 		"action.push": "⏳ Push in progress...",
 		"action.pull": "⏳ Pull in progress...",
@@ -282,6 +318,21 @@ const locales: Record<string, LocaleMap> = {
 			"输入密码以启用客户端加密。请勿丢失，否则数据将无法解密。",
 		"msg.password_forgot":
 			"加密密码已从内存中清除。在不重新输入密码的情况下，将无法解密之前上传的数据。",
+
+		"dialog.remove_encryption_title": "🔓 移除加密",
+		"dialog.remove_encryption_body":
+			"远程仓库将以无加密方式重新上传：\n• 所有内容将以明文重新上传（笔记本名称也会恢复）\n• 所有旧加密文件都会从远程仓库删除，任何人都无法恢复它们。\n\n请先输入您当前的加密密码。如果密码错误，本次操作将被拒绝。",
+		"placeholder.current_password": "当前密码",
+		"button.confirm": "✔️ 确认并重新上传",
+		"hint.remove_encryption":
+			"⚠️ 不可逆操作：旧加密数据一旦被删除将无法恢复。",
+		"error.password_required": "❌ 请输入当前加密密码以确认移除。",
+		"msg.encryption_removed": "✅ 已移除加密：远程仓库已重新以明文上传。",
+		"progress.removing_encryption": "正在移除加密...",
+		"progress.verifying_password": "正在验证旧密码...",
+		"progress.cleaning_enc": "正在删除旧加密文件...",
+		"progress.uploading_plaintext": "正在以明文重新上传 ({n})...",
+
 		"part.the": "",
 		"part.and": " 和 ",
 		"part.export_warning_suffix": " 的明文。\n请勿分享此文件。",
@@ -346,6 +397,7 @@ const locales: Record<string, LocaleMap> = {
 		"msg.themes_installed": "🎨 安装了 {n} 个主题。",
 		"msg.notebooks_processed": "📖 打开了 {n} 个笔记本。",
 		"msg.errors": "⚠️ 发生 {n} 个错误：打开开发者工具查看详情 (Ctrl+Shift+I)。",
+		"msg.errors_occurred": " ⚠️ 发生 {n} 个错误：打开开发者工具查看详情 (Ctrl+Shift+I)。",
 		"msg.restored": "✅ 已恢复：{n} 个文件 (commit: {sha} - {message})",
 		"action.push": "⏳ 正在推送...",
 		"action.pull": "⏳ 正在拉取...",

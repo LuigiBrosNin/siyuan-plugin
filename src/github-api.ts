@@ -165,6 +165,24 @@ export class GitHubAPI {
 		});
 	}
 
+	async initEmptyRepo(branch: string) {
+		// GitHub returns 409 "Git Repository is empty" for every git endpoint
+		// (blobs/trees/commits) until the repo owns at least one commit. Seed a
+		// placeholder file via the contents API so the git object endpoints are
+		// usable for the very first push.
+		const path = "_siyuan-github-sync-init";
+		const content = btoa("Initialized by siyuan-github-sync plugin.");
+		return this.gh(
+			`/repos/${this.username}/${this.repo}/contents/${path}`,
+			"PUT",
+			{
+				message: "chore: init repository for siyuan-github-sync",
+				content,
+				branch,
+			},
+		);
+	}
+
 	createTree(baseTree: string, treeItems: any[]) {
 		const payload: any = { tree: treeItems };
 		if (baseTree) {

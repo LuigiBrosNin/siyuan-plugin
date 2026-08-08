@@ -104,7 +104,7 @@ export async function deriveKeys(
 			["deriveBits", "deriveKey"],
 		);
 		const key = await crypto.subtle.deriveKey(
-			{ name: "PBKDF2", salt: saltBytes, iterations: 200_000, hash: "SHA-256" },
+			{ name: "PBKDF2", salt: saltBytes as BufferSource, iterations: 200_000, hash: "SHA-256" },
 			keyMaterial,
 			{ name: "AES-GCM", length: 256 },
 			true,

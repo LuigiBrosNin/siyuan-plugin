@@ -202,11 +202,14 @@ export async function installMissingThemes(
 		if (ok) installed++;
 		await sleep(200);
 	}
-	if (installed > 0 && remoteManifest.themeLight) {
-		await setActiveTheme(remoteManifest.themeLight, 0);
-	}
-	if (installed > 0 && remoteManifest.themeDark) {
-		await setActiveTheme(remoteManifest.themeDark, 1);
+	if (installed > 0) {
+		const restored = await getCurrentAppearance();
+		const currentMode = restored?.mode ?? 0;
+		if (currentMode === 0 && remoteManifest.themeLight) {
+			await setActiveTheme(remoteManifest.themeLight, 0);
+		} else if (currentMode === 1 && remoteManifest.themeDark) {
+			await setActiveTheme(remoteManifest.themeDark, 1);
+		}
 	}
 	return installed;
 }
